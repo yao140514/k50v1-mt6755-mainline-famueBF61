@@ -127,3 +127,53 @@ MP0_CPU1_PWR_CON &= ~SRAM_CKISO;
 | LK 做 spin-table | LK 能在 ATF 之前放出从核 | 大，且要反复刷 LK |
 
 目前建议按 1 → 2 → 3 的顺序试。
+
+## 运行时方案（已实现，待验证）
+
+`scripts/smp_on.sh` 用 devmem 复现厂商的上电序列，然后热插拔上线——**不改内核**。
+
+```sh
+# 在设备上（镜像里已带 /smp_on.sh）
+sh /smp_on.sh 1          # 先只上 CPU1，风险最小
+sh /smp_on.sh 1 2 3      # MP0 的三个从核
+sh /smp_on.sh all        # 1..7
+```
+
+脚本对每个核做：
+
+```
+1. cluster（CPUTOP）没上电就先上       bit8(MP0) / bit15(MP1)
+2. PWR_CON |= PWR_ON | PWR_ON_2ND      bit2|bit3，等 PWR_STATUS 对应位
+3. PWR_CON &= ~PWR_ISO                 bit1
+4. L1_PDN &= ~SRAM_PDN                 bit0，等 ACK(bit8) 归 0
+5. PWR_CON |= SRAM_ISOINT_B            bit6
+   PWR_CON &= ~SRAM_CKISO              bit5
+6. echo 1 > /sys/devices/system/cpu/cpuN/online   ← 交给 PSCI
+```
+
+第 6 步是真正的考验：如果 MTCMOS 是唯一缺的东西，`CPU_ON` 这次就会成功。
+
+### 上电状态位对照
+
+| 核 | PWR_STATUS 位 | 掩码 | PWR_CON | L1_PDN |
+|---|---|---|---|---|
+| MP0_CPUTOP | 8 | 0x100 | 0x10006204 | — |
+| CPU0 | 9 | 0x200 | 0x10006208 | 0x10006248 |
+| CPU1 | 10 | 0x400 | 0x1000620C | 0x1000624C |
+| CPU2 | 11 | 0x800 | 0x10006210 | 0x10006250 |
+| CPU3 | 12 | 0x1000 | 0x10006214 | 0x10006254 |
+| MP1_CPUTOP | 15 | 0x8000 | 0x10006218 | — |
+| CPU4 | 16 | 0x10000 | 0x1000621C | 0x10006260 |
+| CPU5 | 17 | 0x20000 | 0x10006220 | 0x10006264 |
+| CPU6 | 18 | 0x40000 | 0x10006224 | 0x10006268 |
+| CPU7 | 19 | 0x80000 | 0x10006228 | 0x1000626C |
+
+### 如果这一步成功，再考虑固化
+
+运行时上电有个副作用：**启动阶段仍然是单核**（内核在 `smp_init()` 时只看到 CPU0），
+所有启动期的并行初始化都享受不到。真要吃到 8 核，需要在
+`drivers/firmware/psci/psci.c` 的 `cpu_psci_cpu_boot()` 之前插一个
+`mtk_mtcmos_cpu_on(cpu)` 钩子，让内核在每次 `CPU_ON` 前先把电源域打开。
+
+但先验证脚本能起来再说——如果 `CPU_ON` 仍然失败，说明还缺 CCI-400 一致性，
+那就要另做功课。
