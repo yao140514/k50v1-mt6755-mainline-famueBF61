@@ -1,6 +1,6 @@
 # k50v1 MT6755 mainline Linux
 
-国产白牌 10 寸平板（板号 `k50v1_64_bsp`，MT6750/MT6755 平台，原厂 Android 10）上运行
+梵沐BF61(MP4)（板号 `k50v1_64_bsp`，MT6750/MT6755 平台，原厂 Android 10）上运行
 **mainline Linux 6.12 LTS** 的移植记录与全部源码。
 
 原厂只提供 3.18 内核 BSP，且没有 GPL 源码；这里从零把 mainline 引导起来，
