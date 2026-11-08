@@ -1,0 +1,388 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * ALPS k50v1_64_bsp - MT6750 tablet (Helio P10 / MT6755 platform)
+ *
+ * Stage 1 bring-up: CPU complex + UART console only.
+ * Everything else (MMC, pinctrl, I2C, display) is added incrementally.
+ */
+
+/dts-v1/;
+
+#include "mt6755.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/phy/phy.h>
+
+/ {
+	model = "ALPS k50v1_64_bsp (MT6750)";
+	compatible = "alps,k50v1-64-bsp", "mediatek,mt6755";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	/*
+	 * No baud suffix on purpose: earlycon then leaves the divisor
+	 * programmed by the bootloader untouched. Giving a baud rate here
+	 * makes 8250_early recompute it from BASE_BAUD*16, which does not
+	 * match the 26 MHz MTK uart clock and produces garbled output.
+	 * The real console gets its baud from the kernel command line.
+	 */
+	chosen: chosen {
+		stdout-path = "serial0";
+		bootargs = "console=ttyS0,921600n8 earlycon loglevel=8 ignore_loglevel                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      ";
+	};
+
+	/*
+	 * Declare a single 512 MiB bank, exactly like the stock DTB does.
+	 * LK rewrites this property at boot with the real DRAM layout it
+	 * probed from the hardware; a multi-range reg here breaks that
+	 * fixup. The 512 MiB value is only a fallback.
+	 */
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0 0x40000000 0 0x20000000>;
+	};
+
+	/*
+	 * LK writes atf-reserved / ram_console / pstore / ccci entries into
+	 * this node during boot. Without it, LK logs "can't find
+	 * reserved-memory node in device tree" and then takes a data abort
+	 * while trying to add the child nodes.
+	 */
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+	};
+
+	/* --- odmdtbo overlay placeholder nodes --- */
+	/*
+	 * The vendor odmdtbo overlay targets these labels. LK resolves them
+	 * through __symbols__ and aborts if any one is missing, so they have
+	 * to exist even though this board does not use them yet.
+	 */
+	odm: odm { };
+	accdet: accdet { };
+	touch: touch { };
+	kd_camera_hw1: kd-camera-hw1 { };
+	mtkfb: mtkfb { };
+	consys: consys { };
+	sleep: sleep { };
+	audgpio: audgpio { };
+	apuart0: apuart0 { };
+	xhci0: xhci0 { };
+	ext_buck_vmd1: ext-buck-vmd1 { };
+	i2c2: i2c2 { };
+	i2c3: i2c3 { };
+	i2c4: i2c4 { };
+	eintc: eintc { };
+	msdc1_ins: msdc1-ins { };
+	dsi_te: dsi-te { };
+	gpio_usage_mapping: gpio-usage-mapping { };
+	mt_pmic_vcama_ldo_reg: mt-pmic-vcama-ldo-reg { };
+	mt_pmic_vsim1_ldo_reg: mt-pmic-vsim1-ldo-reg { };
+	mt_pmic_vsim2_ldo_reg: mt-pmic-vsim2-ldo-reg { };
+	mt_pmic_vldo28_ldo_reg: mt-pmic-vldo28-ldo-reg { };
+	mt_pmic_vibr_ldo_reg: mt-pmic-vibr-ldo-reg { };
+	mt_pmic_vcamd_ldo_reg: mt-pmic-vcamd-ldo-reg { };
+	mt_pmic_vcamio_ldo_reg: mt-pmic-vcamio-ldo-reg { };
+	auxadc: auxadc { };
+	rf_clock_buffer_ctrl: rf-clock-buffer-ctrl { };
+	pmic_clock_buffer_ctrl: pmic-clock-buffer-ctrl { };
+	keypad: keypad { };
+
+	/* --- eMMC (MSDC0) ------------------------------------------- */
+	/*
+	 * No CCU driver yet, so the two clocks mtk-sd requires are modelled
+	 * as fixed clocks. The frequencies are a guess; LK already programmed
+	 * the real dividers and the driver only uses these to derive its own.
+	 * If the card fails to init, try 200 MHz for clk_msdc0 first.
+	 */
+	clk_msdc0: clock-msdc0 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <400000000>;
+	};
+
+	clk_axi: clock-axi {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <200000000>;
+	};
+
+	/*
+	 * The MMC core derives ocr_avail from vmmc; without a supply it is
+	 * empty and mmc_select_voltage() rejects every card with
+	 * "no support for card's volts". eMMC here is fixed at 3.3 V.
+	 */
+	vmmc: regulator-vmmc {
+		compatible = "regulator-fixed";
+		regulator-name = "vmmc";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+	};
+
+	vqmmc: regulator-vqmmc {
+		compatible = "regulator-fixed";
+		regulator-name = "vqmmc";
+		/* regulator-fixed rejects a variable range; VCCQ is 3.3 V here */
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+	};
+
+	/*
+	 * USB 3.3 V rail. Android's PMIC dump reports vusb33 status=1, i.e.
+	 * the bootloader already leaves it on; the driver only needs a
+	 * supply it can ask for (mtu3 refuses to probe without one).
+	 */
+	vusb33: regulator-vusb33 {
+		compatible = "regulator-fixed";
+		regulator-name = "vusb33";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+	};
+
+	/*
+	 * SSUSB -- the vendor kernel drives this block with its own "mu3d"
+	 * driver, which is MediaTek's fork of mtu3 (same IP, same register
+	 * map: MAC + SIF/IPPC + xHCI wrapper). Mainline's mtu3 can take it.
+	 *
+	 *   mac   0x11271000   device MAC; the 0x11270000 page is the xHCI
+	 *                      wrapper and stays unused in peripheral mode
+	 *   ippc  0x11280700   IP power/clock control inside the "sif" page
+	 *                      (same offset as mt8173, SSUSB_SIFSLV_IPPC_BASE=0)
+	 *   IRQ   GIC_SPI 72   vendor names it "musb-hdrc"; Android reports it
+	 *                      as virq 104, and 104 - 32 = 72 confirms it
+	 *
+	 * No clocks property on purpose: mtu3 grabs them with
+	 * devm_clk_bulk_get_optional() and MT6755 has no clock driver yet, so
+	 * the gates stay exactly as the bootloader left them. If probe fails
+	 * with "clks of sts1 are not stable", that is the missing piece.
+	 */
+	/*
+	 * SSUSB PHY. The vendor calls this IP "a60810" (drivers/misc/
+	 * mediatek/mu3phy/mt6755/mtk-phy-asic.c) and mainline's phy-mtk-tphy
+	 * is the same driver upstream. MT6755 sits in the MT8173 generation,
+	 * so reuse that pdata; the vendor code touches 0x11290000 + 0x100 /
+	 * 0x110 / 0x300 for the PLL, which is exactly the shared "sif" window
+	 * of this layout.
+	 *
+	 * Only the U2 port is described: with the clock gates open the IP
+	 * reports "U2 IP" and "high-speed", i.e. this package has no USB3
+	 * port wired, and mtu3 would refuse to probe a U3 phy it cannot use.
+	 *
+	 * Without a phy, mtu3's mtu3_device_reset() leaves the MAC in reset
+	 * and IP_PW_STS1 reads 0 forever -- that is the timeout we keep
+	 * hitting.
+	 */
+	u3phy: t-phy@11290000 {
+		compatible = "mediatek,mt8173-u3phy";
+		reg = <0 0x11290000 0 0x800>;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		status = "okay";
+
+		u2port0: usb-phy@11290800 {
+			reg = <0 0x11290800 0 0x100>;
+			#phy-cells = <1>;
+			status = "okay";
+		};
+	};
+
+	usb0: usb@11271000 {
+		compatible = "mediatek,mtu3";
+		reg = <0 0x11271000 0 0x3000>,
+		      <0 0x11280700 0 0x0100>;
+		reg-names = "mac", "ippc";
+		/* GIC_SPI 72, IRQ_TYPE_LEVEL_LOW */
+		interrupts = <0 72 8>;
+		vusb33-supply = <&vusb33>;
+		phys = <&u2port0 PHY_TYPE_USB2>;
+		/*
+		 * This package has no USB3 port wired. Without the mask the
+		 * driver reads IP_DEV_CAP before the SIF clock is up, gets
+		 * 0xffffffff, concludes "U3 capable" and then waits forever
+		 * for U3_MAC_RST_B_STS. Forcing u3p_dis_msk makes
+		 * mtu3_check_params() clear u3_capable, so only the U2 bits
+		 * (SYSPLL / REF / SYS125) are required -- and those are
+		 * already stable when the kernel starts.
+		 */
+		mediatek,u3p-dis-msk = <0x1>;
+		dr_mode = "peripheral";
+		status = "okay";
+	};
+
+	/* --- I2C controllers ----------------------------------------- */
+	/*
+	 * Mainline has no mt6755 entry; mt8173 is the same generation and the
+	 * same IP block (auto_restart, aux_len_reg, dcm), so reuse its of_data.
+	 * clock-div comes from the stock DTB (10). The real source clock is
+	 * unknown, 66 MHz is the usual MTK value -- if transfers fail, try 100.
+	 */
+	/*
+	 * Pin controller. Driver + pin table ported from the mtk-mainline
+	 * fork (pinctrl-staging branch); it uses the same paris framework that
+	 * 6.12 still ships, so it builds unmodified.
+	 *
+	 * EINT is intentionally left out: paris only warns when it is missing
+	 * ("Failed to add EINT, but pinctrl still can work").
+	 */
+	pio: pinctrl@10005000 {
+		compatible = "mediatek,mt6755-pinctrl";
+		reg = <0 0x10005000 0 0x1000>,
+		      <0 0x10002000 0 0x200>,
+		      <0 0x10002200 0 0x200>,
+		      <0 0x10002400 0 0x200>,
+		      <0 0x10002600 0 0x200>,
+		      <0 0x10002800 0 0x200>,
+		      <0 0x10002a00 0 0x200>;
+		reg-names = "gpio", "iocfg0", "iocfg1", "iocfg2",
+			    "iocfg3", "iocfg4", "iocfg5";
+		gpio-controller;
+		#gpio-cells = <2>;
+		gpio-ranges = <&pio 0 0 190>;
+
+		/*
+		 * paris pinctrl DT encoding: one cell per pin, (pin << 8) | func.
+		 * Pin 92 = SDA0 (func 1), pin 93 = SCL0 (func 1).
+		 * (include/dt-bindings/pinctrl/mt65xx.h: MTK_PIN_NO/MTK_PIN_FUNC)
+		 *
+		 * No bias-pull-up on purpose: the DCT-generated board config
+		 * (LK build-k50v1_64_bsp/inc/cust_gpio_boot.h) says
+		 * GPIO92/93 PULLEN = GPIO_PULL_DISABLE for this board, i.e. the
+		 * bus relies on external pull-up resistors. Enabling the weak
+		 * internal pull would only hide the real state of the board rail.
+		 */
+		i2c0_pins_default: i2c0-pins-default {
+			pins {
+				pinmux = <0x5c01 0x5d01>;
+				input-enable;
+			};
+		};
+
+		/* Same two pads, but muxed back to plain GPIO for i2c-gpio. */
+		i2c0_gpio_pins: i2c0-gpio-pins {
+			pins {
+				pinmux = <0x5c00 0x5d00>;
+				bias-pull-up;
+				input-enable;
+				input-schmitt-enable;
+			};
+		};
+
+		/* i2c1 pads (GPIO91 = SDA1, GPIO94 = SCL1) for the control bus. */
+		i2c1_gpio_pins: i2c1-gpio-pins {
+			pins {
+				pinmux = <0x5b00 0x5e00>;
+				bias-pull-up;
+				input-enable;
+				input-schmitt-enable;
+			};
+		};
+	};
+
+	clk_i2c: clock-i2c {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <66000000>;
+	};
+
+	i2c0: i2c@11007000 {
+		compatible = "mediatek,mt8173-i2c";
+		reg = <0 0x11007000 0 0x1000>, <0 0x11000100 0 0x80>;
+		/* GIC_SPI 84, IRQ_TYPE_LEVEL_LOW */
+		interrupts = <0 84 8>;
+		clock-div = <10>;
+		clocks = <&clk_i2c>, <&clk_i2c>;
+		clock-names = "main", "dma";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c0_pins_default>;
+		clock-frequency = <100000>;
+		/* hardware controller still never completes a transfer */
+		status = "disabled";
+	};
+
+	/*
+	 * Bit-banged I2C0 on the same pads (SDA=GPIO92, SCL=GPIO93).
+	 * Open-drain is emulated by the GPIO layer: the pad is only ever
+	 * driven low, the external resistors pull it high.
+	 */
+	i2c_gpio0: i2c-gpio {
+		compatible = "i2c-gpio";
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c0_gpio_pins>;
+		sda-gpios = <&pio 92 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&pio 93 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <50>;	/* ~10 kHz: panel FPC has a lot of capacitance */
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+	};
+
+	/*
+	 * Control bus: the same bit-bang driver on the i2c1 pads, which carry a
+	 * device we know answers (0x62 on the hardware controller). If this one
+	 * reads clean data, the bit-bang is sound and the i2c0 trouble is on the
+	 * panel side; if it also returns garbage, the bit-bang itself is at fault.
+	 */
+	i2c_gpio1: i2c-gpio-1 {
+		compatible = "i2c-gpio";
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c1_gpio_pins>;
+		sda-gpios = <&pio 91 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&pio 94 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <20>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+	};
+
+	i2c1: i2c@11008000 {
+		compatible = "mediatek,mt8173-i2c";
+		reg = <0 0x11008000 0 0x1000>, <0 0x11000180 0 0x80>;
+		/* GIC_SPI 85, IRQ_TYPE_LEVEL_LOW */
+		interrupts = <0 85 8>;
+		clock-div = <10>;
+		clocks = <&clk_i2c>, <&clk_i2c>;
+		clock-names = "main", "dma";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		/* pads are owned by i2c-gpio-1 (control bus) for now */
+		status = "disabled";
+	};
+
+	mmc0: mmc@11230000 {
+		compatible = "mediatek,mt6795-mmc";
+		vmmc-supply = <&vmmc>;
+		vqmmc-supply = <&vqmmc>;
+		/* no 1.8 V switch: VCCQ is fixed at 3.3 V on this board */
+		no-1-8-v;
+		reg = <0 0x11230000 0 0x1000>;
+		/* GIC_SPI 79, IRQ_TYPE_LEVEL_LOW */
+		interrupts = <0 79 8>;
+		clocks = <&clk_msdc0>, <&clk_axi>;
+		clock-names = "source", "hclk";
+		bus-width = <8>;
+		max-frequency = <200000000>;
+		non-removable;
+		cap-mmc-highspeed;
+		no-sd;
+		no-sdio;
+		status = "okay";
+	};
+
+};
+
+&uart0 {
+	status = "okay";
+
+
+
+
+};

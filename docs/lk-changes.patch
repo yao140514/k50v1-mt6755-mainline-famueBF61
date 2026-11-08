@@ -1,0 +1,504 @@
+diff --git a/app/mt_boot/mt_boot.c b/app/mt_boot/mt_boot.c
+index 0c83cc2..c33e4d6 100644
+--- a/app/mt_boot/mt_boot.c
++++ b/app/mt_boot/mt_boot.c
+@@ -1476,6 +1476,8 @@ int boot_linux_fdt(void *kernel, unsigned *tags,
+ 	 * because watchdog is still alive.
+ 	 */
+ 	mtk_wdt_restart();
++	/* bring-up: no MTK wdt driver in mainline to pet it */
++	mtk_wdt_disable();
+ 
+ #ifdef USER_LOAD
+ 	//For not intruding user load, print LK log in a whole here, when triggered.
+diff --git a/dev/lcm/mt65xx_lcm_list.c b/dev/lcm/mt65xx_lcm_list.c
+index f81820f..30131c1 100755
+--- a/dev/lcm/mt65xx_lcm_list.c
++++ b/dev/lcm/mt65xx_lcm_list.c
+@@ -52,6 +52,7 @@ extern LCM_DRIVER hct_otm1285a_dsi_vdo_hd_boe;
+ extern LCM_DRIVER hct_ili9881_dsi_vdo_hd_cpt;
+ extern LCM_DRIVER hct_hx8394f_dsi_vdo_hd_cmi;
+ extern LCM_DRIVER hct_otm1282_dsi_vdo_hd_auo;
++extern LCM_DRIVER nt35695B_fhd_dsi_cmd_auo_nt50358_lcm_drv;
+ extern LCM_DRIVER hct_rm68200_dsi_vdo_hd_cpt;
+ extern LCM_DRIVER hct_rm68200_dsi_vdo_hd_tm_50_xld;
+ extern LCM_DRIVER hct_nt35521s_dsi_vdo_hd_boe_50_xld;
+@@ -89,6 +90,9 @@ LCM_DRIVER *lcm_driver_list[] = {
+ #if defined(HCT_HX8394D_DSI_VDO_HD_CMI)
+        &hct_hx8394d_dsi_vdo_hd_cmi,
+ #endif
++#if defined(NT35695B_FHD_DSI_CMD_AUO_NT50358)
++       &nt35695B_fhd_dsi_cmd_auo_nt50358_lcm_drv,
++#endif
+ };
+ 
+ #define LCM_COMPILE_ASSERT(condition) LCM_COMPILE_ASSERT_X(condition, __LINE__)
+diff --git a/include/debug.h b/include/debug.h
+index bef3fd6..355b5ed 100644
+--- a/include/debug.h
++++ b/include/debug.h
+@@ -33,7 +33,7 @@
+ extern "C" {
+ #endif
+ 
+-#define DEBUGLEVEL 0
++#define DEBUGLEVEL 2
+ 
+ /* debug levels */
+ #define CRITICAL 0
+diff --git a/kernel/main.c b/kernel/main.c
+index c2655c5..26c9cef 100644
+--- a/kernel/main.c
++++ b/kernel/main.c
+@@ -1,3 +1,5 @@
++/* --- early boot breadcrumbs (bring-up diagnosis) --- */
++#define EARLY_POKE(c) do { *(volatile unsigned char *)0x11002000 = (unsigned char)(c); } while (0)
+ /*
+  * Copyright (c) 2008 Travis Geiselbrecht
+  *
+@@ -82,6 +84,7 @@ static void call_constructors(void)
+ void kmain(void) __NO_RETURN __EXTERNALLY_VISIBLE;
+ void kmain(void)
+ {
++	EARLY_POKE('K');
+ #if !defined(MACH_FPGA) && !defined(SB_LK_BRINGUP)
+ 	boot_time = get_timer(0);
+ #endif
+@@ -94,6 +97,7 @@ void kmain(void)
+ 
+ 	// do any super early platform initialization
+ 	platform_early_init();
++	EARLY_POKE('I');
+ 
+ #if defined(MACH_FPGA) || defined(SB_LK_BRINGUP)
+ 	boot_time = get_timer(0);
+@@ -101,9 +105,11 @@ void kmain(void)
+ 
+ 	// do any super early target initialization
+ 	target_early_init();
++	EARLY_POKE('J');
+ 
+ 	dprintf(INFO, "welcome to lk\n\n");
+ 	dprintf(INFO, "LK_VER_TAG = %s\n", LK_VER_TAG);
++	EARLY_POKE('L');
+ 
+ 	// deal with any static constructors
+ 	dprintf(SPEW, "calling constructors\n");
+@@ -112,10 +118,12 @@ void kmain(void)
+ 	// bring up the kernel heap
+ 	dprintf(SPEW, "initializing heap\n");
+ 	heap_init();
++	EARLY_POKE('M');
+ 
+ 	// initialize the threading system
+ 	dprintf(SPEW, "initializing threads\n");
+ 	thread_init();
++	EARLY_POKE('N');
+ 
+ 	// initialize the dpc system
+ 	dprintf(SPEW, "initializing dpc\n");
+@@ -124,6 +132,7 @@ void kmain(void)
+ 	// initialize kernel timers
+ 	dprintf(SPEW, "initializing timers\n");
+ 	timer_init();
++	EARLY_POKE('O');
+ 
+ #ifdef  MTK_LK_IRRX_SUPPORT
+    mtk_ir_init(0);
+diff --git a/platform/mt6755/boot_mode.c b/platform/mt6755/boot_mode.c
+index e422e6b..7079c1d 100644
+--- a/platform/mt6755/boot_mode.c
++++ b/platform/mt6755/boot_mode.c
+@@ -164,7 +164,8 @@ void boot_mode_select(void)
+ 			}
+ 		}
+ 
+-		if (mtk_detect_key(MT65XX_BOOT_MENU_KEY)) {
++		/* menu entry disabled for bring-up: spurious key detection on this board */
++		if (0 && mtk_detect_key(MT65XX_BOOT_MENU_KEY)) {
+ 			dprintf(CRITICAL, "\n%s Check  boot menu\n",MODULE_NAME);
+ 			dprintf(CRITICAL, "%s Wait 50ms for special keys\n",MODULE_NAME);
+ 			mtk_wdt_disable();
+@@ -174,7 +175,7 @@ void boot_mode_select(void)
+ 			return;
+ 		}
+ #ifdef MT65XX_RECOVERY_KEY
+-		if (mtk_detect_key(MT65XX_RECOVERY_KEY)) {
++		if (0 && mtk_detect_key(MT65XX_RECOVERY_KEY)) /* disabled for bring-up */ {
+ 			dprintf(CRITICAL, "%s Detect cal key\n",MODULE_NAME);
+ 			dprintf(CRITICAL, "%s Enable recovery mode\n",MODULE_NAME);
+ 			g_boot_mode = RECOVERY_BOOT;
+@@ -242,7 +243,7 @@ void boot_mode_select(void)
+ 			}
+ 		}
+ #ifdef MT65XX_RECOVERY_KEY
+-		if (mtk_detect_key(MT65XX_RECOVERY_KEY)) {
++		if (0 && mtk_detect_key(MT65XX_RECOVERY_KEY)) /* disabled for bring-up */ {
+ 			dprintf(INFO, "%s Detect cal key\n",MODULE_NAME);
+ 			dprintf(INFO, "%s Enable recovery mode\n",MODULE_NAME);
+ 			g_boot_mode = RECOVERY_BOOT;
+diff --git a/platform/mt6755/boot_mode_menu.c b/platform/mt6755/boot_mode_menu.c
+index 2b9e75a..c158e50 100644
+--- a/platform/mt6755/boot_mode_menu.c
++++ b/platform/mt6755/boot_mode_menu.c
+@@ -224,7 +224,8 @@ BOOL boot_menu_key_trigger(void)
+ 
+ BOOL boot_menu_detection(void)
+ {
+-	return boot_menu_key_trigger();
++	/* menu disabled for bring-up: key detection is unreliable on this board */
++	return FALSE;
+ }
+ 
+ 
+diff --git a/platform/mt6755/platform.c b/platform/mt6755/platform.c
+index cb6148b..da483fb 100644
+--- a/platform/mt6755/platform.c
++++ b/platform/mt6755/platform.c
+@@ -1,3 +1,5 @@
++/* --- early boot breadcrumbs (bring-up diagnosis) --- */
++#define EARLY_POKE(c) do { *(volatile unsigned char *)0x11002000 = (unsigned char)(c); } while (0)
+ /* Copyright Statement:
+ *
+ * This software/firmware and related documentation ("MediaTek Software") are
+@@ -80,6 +82,7 @@ extern u8 g_oemkey[OEM_PUBK_SZ];
+ extern void platform_early_init_timer();
+ extern void jump_da(u32 addr, u32 arg1, u32 arg2);
+ extern int i2c_hw_init(void);
++extern unsigned short pmic_set_register_value(PMU_FLAGS_LIST_ENUM flagname, unsigned int val);
+ extern int mboot_common_load_logo(unsigned long logo_addr, char* filename);
+ extern int sec_usbdl_verify_da(unsigned char*, unsigned int, unsigned char*, unsigned int);
+ extern void mtk_wdt_disable(void);
+@@ -434,9 +437,12 @@ void platform_early_init(void)
+ 	unsigned int time_platform_early_init;
+ #endif
+ 
++	EARLY_POKE('A');
+ 	platform_init_interrupts();
++	EARLY_POKE('B');
+ 
+ 	platform_early_init_timer();
++	EARLY_POKE('C');
+ 
+ 
+ #if defined(MACH_FPGA) || defined(SB_LK_BRINGUP)
+@@ -450,11 +456,18 @@ void platform_early_init(void)
+ #ifndef MACH_FPGA
+ #ifndef DUMMY_AP
+ 	mt_gpio_set_default();
++	EARLY_POKE('D');
+ #endif
+ #endif
+ 
+ 	/* initialize the uart */
++	/* force_log_on */
++	if (g_boot_arg) {
++		g_boot_arg->log_enable = 1;
++		g_boot_arg->log_dynamic_switch = 1;
++	}
+ 	uart_init_early();
++	EARLY_POKE('E');
+ 
+ 	dprintf(SPEW, "bootarg_addr: 0x%x, bootarg_size: 0x%x\n", platform_get_bootarg_addr(), platform_get_bootarg_size());
+ 
+@@ -469,6 +482,7 @@ void platform_early_init(void)
+ 	time_wdt_early_init = get_timer(0);
+ #endif
+ 	mtk_wdt_init();
++	EARLY_POKE('F');
+ #ifdef LK_PROFILING
+ 	dprintf(INFO, "[PROFILE] ------- WDT Init  takes %d ms -------- \n", (int)get_timer(time_wdt_early_init));
+ #endif
+@@ -490,6 +504,23 @@ void platform_early_init(void)
+ 	//i2c init
+ 	i2c_hw_init();
+ 
++	/*
++	 * bring-up: LK i2c_hw_init() is a stub and preloader only sets up
++	 * I2C1 (used for the charger). Mux I2C0 here so a mainline kernel
++	 * can reach the touch controller at 0x5d.
++	 *   I2C0_SDA = GPIO92, I2C0_SCL = GPIO93  (cust_gpio_usage.h)
++	 */
++	mt_set_gpio_mode(92, GPIO_MODE_01);
++	mt_set_gpio_mode(93, GPIO_MODE_01);
++	mt_set_gpio_pull_enable(92, GPIO_PULL_ENABLE);
++	mt_set_gpio_pull_enable(93, GPIO_PULL_ENABLE);
++	mt_set_gpio_pull_select(92, GPIO_PULL_UP);
++	mt_set_gpio_pull_select(93, GPIO_PULL_UP);
++	mt_set_gpio_ies(92, 1);
++	mt_set_gpio_ies(93, 1);
++	EARLY_POKE('G');
++
++
+ #if defined(MACH_FPGA) || defined(SB_LK_BRINGUP)
+ 	//mtk_timer_init();  // GPT4 will be initialized at PL after
+ 	mtk_wdt_disable();  // WDT will be triggered when uncompressing linux image on FPGA
+@@ -508,6 +539,44 @@ void platform_early_init(void)
+ 	time_pmic_init = get_timer(0);
+ #endif
+ 	pmic_init();
++
++	/*
++	 * bring-up: power the touch panel.
++	 *
++	 * The vendor device tree says vtouch-supply = <&mt_pmic_vldo28_ldo_reg>,
++	 * so the touch controller runs from VLDO28. Nothing in the mainline
++	 * kernel can switch that rail on (no MT6353 driver exists), and with the
++	 * rail off the controller only answers its I2C address through the ESD
++	 * diodes while its register file stays dead -- exactly what we measured:
++	 * ACK at 0x38, deterministic garbage on every read.
++	 *
++	 * Turning it on here means the kernel inherits a powered panel without
++	 * needing any PMIC driver. VLDO28 is a fixed 2.8 V share LDO, so only
++	 * its two enable inputs have to be asserted.
++	 */
++	pmic_set_register_value(PMIC_LDO_VLDO28_EN_0, 1);
++	pmic_set_register_value(PMIC_LDO_VLDO28_EN_1, 1);
++	dprintf(CRITICAL, "[BRINGUP] VLDO28 (touch) enabled\n");
++
++	/*
++	 * bring-up: power the USB PHY.
++	 *
++	 * The vendor SSUSB PHY driver enables VUSB33 as the first step of
++	 * phy_init_soc() (CONFIG_MTK_PMIC_CHIP_MT6353 branch). Without that
++	 * rail the PHY's registers still read and write normally -- they live
++	 * on the always-on 1.8 V domain -- but the transceiver has no supply,
++	 * so driving SOFT_CONN in the MAC produces no D+ pull-up and the host
++	 * never sees a device.
++	 */
++	pmic_set_register_value(PMIC_LDO_VUSB33_EN, 1);
++	dprintf(CRITICAL, "[BRINGUP] VUSB33 (usb phy) enabled\n");
++
++	/*
++	 * GPIO10 (GPIO_CTP_RST_PIN) is deliberately left alone: Android keeps
++	 * it low while the touch controller works, so it is not the reset line
++	 * and driving it high only added noise to the picture.
++	 */
++	EARLY_POKE('H');
+ 	/*
+ 	    // Workaround by Weiqi
+ 	    mt6331_upmu_set_rg_vgp1_en(1);
+diff --git a/platform/mt6755/primary_display.c b/platform/mt6755/primary_display.c
+index 199347a..74ca827 100644
+--- a/platform/mt6755/primary_display.c
++++ b/platform/mt6755/primary_display.c
+@@ -906,6 +906,11 @@ int primary_display_trigger(int blocking)
+ 	DISPFUNC();
+ 	int x=0, y=0;
+ 	int width = 0, height =0;
++	/* no_display_guard: display init skipped, make trigger a no-op */
++	if (pgc == NULL || pgc->plcm == NULL || pgc->dpmgr_handle == NULL) {
++		return -1;
++	}
++
+ 	x = disp_lcm_x(pgc->plcm);
+ 	y = disp_lcm_y(pgc->plcm);
+ 	width = disp_lcm_width(pgc->plcm);
+diff --git a/project/k50v1_64_bsp.mk b/project/k50v1_64_bsp.mk
+index 2aa7cb1..d57a243 100644
+--- a/project/k50v1_64_bsp.mk
++++ b/project/k50v1_64_bsp.mk
+@@ -13,15 +13,16 @@ MTK_KERNEL_POWER_OFF_CHARGING=yes
+ MTK_PUMP_EXPRESS_PLUS_SUPPORT := yes
+ MTK_BQ25896_SUPPORT := yes
+ MTK_LCM_PHYSICAL_ROTATION = 0
+-CUSTOM_LK_LCM="nt35695_fhd_dsi_cmd_truly_nt50358"
++CUSTOM_LK_LCM="nt35695B_fhd_dsi_cmd_auo_nt50358"
+ MTK_SECURITY_SW_SUPPORT = yes
+ MTK_VERIFIED_BOOT_SUPPORT = yes
+ MTK_SEC_FASTBOOT_UNLOCK_SUPPORT = yes
+ MTK_SECURITY_ANTI_ROLLBACK = no
+-BOOT_LOGO := fhd
++BOOT_LOGO := hd720
+ DEBUG := 0
+ #DEFINES += WITH_DEBUG_DCC=1
+ DEFINES += WITH_DEBUG_UART=1
++DEFINES += MACH_FPGA_NO_DISPLAY=y
+ #DEFINES += WITH_DEBUG_FBCON=1
+ #DEFINES += MACH_FPGA=y
+ CUSTOM_LK_USB_UNIQUE_SERIAL=no
+diff --git a/scripts/dct/DrvGen.py b/scripts/dct/DrvGen.py
+index 6dfddbc..df517c5 100755
+--- a/scripts/dct/DrvGen.py
++++ b/scripts/dct/DrvGen.py
+@@ -10,6 +10,7 @@ import xml.dom.minidom
+ sys.dont_write_bytecode = True
+ 
+ sys.path.append('.')
++sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'obj'))
+ sys.path.append('..')
+ 
+ from obj.ChipObj import ChipObj
+@@ -32,7 +33,7 @@ from utility.util import LogLevel
+ from utility.util import log
+ 
+ def usage():
+-    print '''
++    print('''
+ usage: DrvGen [dws_path] [file_path] [log_path] [paras]...
+ 
+ options and arguments:
+@@ -41,7 +42,7 @@ dws_path    :    dws file path
+ file_path   :    where you want to put generated files
+ log_path    :    where to store the log files
+ paras        :    parameter for generate wanted file
+-'''
++''')
+ 
+ def is_oldDws(path, gen_spec):
+     if not os.path.exists(path):
+@@ -50,7 +51,7 @@ def is_oldDws(path, gen_spec):
+ 
+     try:
+         root = xml.dom.minidom.parse(dws_path)
+-    except Exception, e:
++    except Exception as e:
+         log(LogLevel.warn, '%s is not xml format, try to use old DCT!' %(dws_path))
+         if len(gen_spec) == 0:
+             log(LogLevel.warn, 'Please use old DCT UI to gen all files!')
+diff --git a/scripts/dct/obj/ClkObj.py b/scripts/dct/obj/ClkObj.py
+index c747922..b23d986 100755
+--- a/scripts/dct/obj/ClkObj.py
++++ b/scripts/dct/obj/ClkObj.py
+@@ -3,7 +3,7 @@
+ 
+ import re
+ import string
+-import ConfigParser
++import configparser as ConfigParser
+ 
+ import xml.dom.minidom
+ 
+diff --git a/scripts/dct/obj/EintObj.py b/scripts/dct/obj/EintObj.py
+index ffda65a..db5f457 100755
+--- a/scripts/dct/obj/EintObj.py
++++ b/scripts/dct/obj/EintObj.py
+@@ -5,7 +5,7 @@ import re
+ import os
+ import string
+ 
+-import ConfigParser
++import configparser as ConfigParser
+ import xml.dom.minidom
+ 
+ from data.EintData import EintData
+diff --git a/scripts/dct/obj/GpioObj.py b/scripts/dct/obj/GpioObj.py
+index 7ddb80c..8b835d6 100755
+--- a/scripts/dct/obj/GpioObj.py
++++ b/scripts/dct/obj/GpioObj.py
+@@ -5,14 +5,13 @@ import re
+ import os
+ import sys
+ import string
+-import ConfigParser
++import configparser as ConfigParser
+ import xml.dom.minidom
+ 
+ 
+ from data.GpioData import GpioData
+ from data.EintData import EintData
+ from ModuleObj import ModuleObj
+-import ChipObj
+ from utility.util import compare
+ from utility.util import sorted_key
+ from utility.util import log
+diff --git a/scripts/dct/obj/I2cObj.py b/scripts/dct/obj/I2cObj.py
+index f308fff..c7d6004 100755
+--- a/scripts/dct/obj/I2cObj.py
++++ b/scripts/dct/obj/I2cObj.py
+@@ -4,14 +4,13 @@
+ import re
+ import string
+ import xml.dom.minidom
+-import ConfigParser
++import configparser as ConfigParser
+ 
+ from ModuleObj import ModuleObj
+ #from utility import util
+ from utility.util import sorted_key
+ from data.I2cData import I2cData
+ from data.I2cData import BusData
+-import ChipObj
+ 
+ class I2cObj(ModuleObj):
+     _busList = []
+diff --git a/scripts/dct/obj/KpdObj.py b/scripts/dct/obj/KpdObj.py
+index b22152d..7d5e123 100755
+--- a/scripts/dct/obj/KpdObj.py
++++ b/scripts/dct/obj/KpdObj.py
+@@ -3,7 +3,7 @@
+ 
+ import re
+ import string
+-import ConfigParser
++import configparser as ConfigParser
+ import xml.dom.minidom
+ 
+ from ModuleObj import ModuleObj
+diff --git a/scripts/dct/obj/Md1EintObj.py b/scripts/dct/obj/Md1EintObj.py
+index cb0a3d7..7548244 100755
+--- a/scripts/dct/obj/Md1EintObj.py
++++ b/scripts/dct/obj/Md1EintObj.py
+@@ -1,7 +1,7 @@
+ #! /usr/bin/python
+ # -*- coding: utf-8 -*-
+ 
+-import ConfigParser
++import configparser as ConfigParser
+ import string
+ import xml.dom.minidom
+ from itertools import dropwhile
+diff --git a/scripts/dct/obj/PmicObj.py b/scripts/dct/obj/PmicObj.py
+index 5c0b8ad..44aa231 100755
+--- a/scripts/dct/obj/PmicObj.py
++++ b/scripts/dct/obj/PmicObj.py
+@@ -3,7 +3,7 @@
+ 
+ import sys, os
+ import re
+-import ConfigParser
++import configparser as ConfigParser
+ import xml.dom.minidom
+ 
+ from ModuleObj import ModuleObj
+diff --git a/scripts/dct/obj/PowerObj.py b/scripts/dct/obj/PowerObj.py
+index c1fc060..0defaf5 100755
+--- a/scripts/dct/obj/PowerObj.py
++++ b/scripts/dct/obj/PowerObj.py
+@@ -4,10 +4,9 @@
+ import sys,os
+ import re
+ import string
+-import ConfigParser
++import configparser as ConfigParser
+ import xml.dom.minidom
+ 
+-import ChipObj
+ from data.PowerData import PowerData
+ from utility.util import log
+ from utility.util import LogLevel
+diff --git a/scripts/dct/utility/util.py b/scripts/dct/utility/util.py
+index afb2771..1ae185d 100755
+--- a/scripts/dct/utility/util.py
++++ b/scripts/dct/utility/util.py
+@@ -16,16 +16,16 @@ class LogLevel:
+ 
+ def log(level, msg):
+     if level == LogLevel.info:
+-        print LEVEL_INFO + msg
++        print(LEVEL_INFO + msg)
+     elif level == LogLevel.warn:
+-        print LEVEL_WARN + msg
++        print(LEVEL_WARN + msg)
+     elif level == LogLevel.error:
+-        print LEVEL_ERROR + msg
++        print(LEVEL_ERROR + msg)
+ 
+ def compare(value):
+     lst = re.findall(r'\d+', value)
+     if len(lst) != 0:
+-        return string.atoi(lst[0])
++        return int(lst[0])
+ 
+     # if can not find numbers
+     return value

@@ -1,0 +1,4 @@
+initramfs/rootfs/
+*.o
+*.log
+*.bak*
