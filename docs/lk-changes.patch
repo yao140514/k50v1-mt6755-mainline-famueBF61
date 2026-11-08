@@ -1,8 +1,66 @@
 diff --git a/app/mt_boot/mt_boot.c b/app/mt_boot/mt_boot.c
-index 0c83cc2..c33e4d6 100644
+index 0c83cc2..1e5f920 100644
 --- a/app/mt_boot/mt_boot.c
 +++ b/app/mt_boot/mt_boot.c
-@@ -1476,6 +1476,8 @@ int boot_linux_fdt(void *kernel, unsigned *tags,
+@@ -612,6 +612,46 @@ int trusty_dts_append(void *fdt)
+ }
+ #endif
+ 
++/*
++ * Hand the bootloader framebuffer over to the kernel.
++ *
++ * LK has already brought up DSI + the panel and keeps scanning out of
++ * g_fb_base. Mainline has no MT6755 display driver (there is no CCU
++ * clock tree for DSI), so the only way to get pixels on this screen is
++ * to let the kernel adopt that very buffer via simple-framebuffer.
++ *
++ * The region was taken with mblock_reserve_ext(), so it is already
++ * absent from the /memory node rewritten further down -- no
++ * /reserved-memory entry is needed.
++ */
++#ifndef MACH_FPGA_NO_DISPLAY
++/*
++ * The framebuffer node now lives in the board DTS
++ * (/chosen/framebuffer@7e3a0000) and is compiled in, so LK must not
++ * touch /chosen here.
++ *
++ * Do not reintroduce the old cell fixup: writing #address-cells /
++ * #size-cells into /chosen applies to its *children*, and the static
++ * node's reg is written for the root's 2/2 layout. With 1/1 forced in,
++ * of_device_alloc() could not translate the address at all and the
++ * kernel logged "simple-framebuffer ...: No memory resource" forever.
++ * Leaving /chosen alone lets of_n_addr_cells() walk up to the root,
++ * where 2/2 is declared.
++ */
++int framebuffer_dts_append(void *fdt)
++{
++	extern unsigned int g_fb_base;
++
++	if (!g_fb_base)
++		return 0;
++
++	dprintf(CRITICAL, "framebuffer: base=0x%x, node comes from the DTS\n",
++		g_fb_base);
++	return 0;
++}
++
++#endif
++
+ void get_reboot_reason(unsigned int boot_reason)
+ {
+ 	unsigned int rc_wdt_status;
+@@ -941,6 +981,10 @@ int boot_linux_fdt(void *kernel, unsigned *tags,
+ 	}
+ #endif
+ 
++#ifndef MACH_FPGA_NO_DISPLAY
++	framebuffer_dts_append(fdt);
++#endif
++
+ 	offset = fdt_path_offset(fdt, "/chosen");
+ 	ret = fdt_setprop_cell(fdt, offset, "linux,initrd-start",
+ 			       (unsigned int) ramdisk);
+@@ -1476,6 +1520,8 @@ int boot_linux_fdt(void *kernel, unsigned *tags,
  	 * because watchdog is still alive.
  	 */
  	mtk_wdt_restart();
@@ -12,14 +70,14 @@ index 0c83cc2..c33e4d6 100644
  #ifdef USER_LOAD
  	//For not intruding user load, print LK log in a whole here, when triggered.
 diff --git a/dev/lcm/mt65xx_lcm_list.c b/dev/lcm/mt65xx_lcm_list.c
-index f81820f..30131c1 100755
+index f81820f..13c4763 100755
 --- a/dev/lcm/mt65xx_lcm_list.c
 +++ b/dev/lcm/mt65xx_lcm_list.c
 @@ -52,6 +52,7 @@ extern LCM_DRIVER hct_otm1285a_dsi_vdo_hd_boe;
  extern LCM_DRIVER hct_ili9881_dsi_vdo_hd_cpt;
  extern LCM_DRIVER hct_hx8394f_dsi_vdo_hd_cmi;
  extern LCM_DRIVER hct_otm1282_dsi_vdo_hd_auo;
-+extern LCM_DRIVER nt35695B_fhd_dsi_cmd_auo_nt50358_lcm_drv;
++extern LCM_DRIVER nt35695_fhd_dsi_cmd_truly_nt50358_lcm_drv;
  extern LCM_DRIVER hct_rm68200_dsi_vdo_hd_cpt;
  extern LCM_DRIVER hct_rm68200_dsi_vdo_hd_tm_50_xld;
  extern LCM_DRIVER hct_nt35521s_dsi_vdo_hd_boe_50_xld;
@@ -27,84 +85,202 @@ index f81820f..30131c1 100755
  #if defined(HCT_HX8394D_DSI_VDO_HD_CMI)
         &hct_hx8394d_dsi_vdo_hd_cmi,
  #endif
-+#if defined(NT35695B_FHD_DSI_CMD_AUO_NT50358)
-+       &nt35695B_fhd_dsi_cmd_auo_nt50358_lcm_drv,
++#if defined(NT35695_FHD_DSI_CMD_TRULY_NT50358)
++       &nt35695_fhd_dsi_cmd_truly_nt50358_lcm_drv,
 +#endif
  };
  
  #define LCM_COMPILE_ASSERT(condition) LCM_COMPILE_ASSERT_X(condition, __LINE__)
+diff --git a/dev/lcm/nt35695_fhd_dsi_cmd_truly_nt50358/nt35695_fhd_dsi_cmd_truly_nt50358.c b/dev/lcm/nt35695_fhd_dsi_cmd_truly_nt50358/nt35695_fhd_dsi_cmd_truly_nt50358.c
+index 1bd24d3..740776f 100644
+--- a/dev/lcm/nt35695_fhd_dsi_cmd_truly_nt50358/nt35695_fhd_dsi_cmd_truly_nt50358.c
++++ b/dev/lcm/nt35695_fhd_dsi_cmd_truly_nt50358/nt35695_fhd_dsi_cmd_truly_nt50358.c
+@@ -984,29 +984,152 @@ static void lcm_get_params(LCM_PARAMS *params)
+ 
+ #ifdef BUILD_LK
+ #ifndef MACH_FPGA
+-#define TPS65132_SLAVE_ADDR_WRITE  0x7C
++/*
++ * 0x3B, not 0x3E. The LK bit-bang scan of this bus reports exactly one
++ * responder:
++ *     i2c-scan i2c0(gpio92/93): 1 dev: 3b
++ * 0x3B is the alternate TPS65132 address strap; everything written to
++ * 0x3E was silently going nowhere, which is why the panel ran on the
++ * chip's OTP default rails instead of the configured ones.
++ */
++#define TPS65132_SLAVE_ADDR_WRITE  0x76
+ static struct mt_i2c_t TPS65132_i2c;
+ 
++/*
++ * Bit-banged I2C0 for the TPS65132 bias chip.
++ *
++ * LK's I2C0 controller cannot be used on this board: i2c_hw_init() is an
++ * empty stub and the functional clock is never ungated, so every transfer
++ * ends in I2C_ACKERR and the panel never gets its VSP/VSN rails -- which in
++ * turn leaves DSI commands unanswered and DSI_INTSTA.BUSY stuck at 1.
++ *
++ * The two pads themselves are fine (mainline drives them with i2c-gpio and
++ * sees devices on the bus), so clock them out by hand instead. Open-drain is
++ * emulated the usual way: drive 0 as output-low, release as input so the
++ * board's pull-ups take the line high.
++ */
++#define BB_SDA_PIN	92
++#define BB_SCL_PIN	93
++
++/*
++ * ~20 kHz. The pads have a lot of capacitance through the FPC and the
++ * board pulls are weak, so stay well below the 400 kHz the controller
++ * would use -- mainline's i2c-gpio needs 50 us per half period here too.
++ */
++static void bb_delay(void)
++{
++	UDELAY(25);
++}
++
++static void bb_sda(int level)
++{
++	if (level) {
++		mt_set_gpio_dir(BB_SDA_PIN, GPIO_DIR_IN);	/* release to pull-up */
++	} else {
++		mt_set_gpio_dir(BB_SDA_PIN, GPIO_DIR_OUT);
++		mt_set_gpio_out(BB_SDA_PIN, GPIO_OUT_ZERO);
++	}
++}
++
++static void bb_scl(int level)
++{
++	if (level) {
++		mt_set_gpio_dir(BB_SCL_PIN, GPIO_DIR_IN);
++	} else {
++		mt_set_gpio_dir(BB_SCL_PIN, GPIO_DIR_OUT);
++		mt_set_gpio_out(BB_SCL_PIN, GPIO_OUT_ZERO);
++	}
++}
++
++/*
++ * cust_gpio_boot.h ships these two pads with SMT off, no pull and input
++ * buffer disabled, which is fine for the I2C block (it has its own pads)
++ * but useless for bit-banging: a slow rising edge never crosses the
++ * threshold, so every ack read back looks like a NAK.
++ */
++static void bb_pad_init(void)
++{
++	mt_set_gpio_mode(BB_SDA_PIN, GPIO_MODE_00);
++	mt_set_gpio_mode(BB_SCL_PIN, GPIO_MODE_00);
++
++	mt_set_gpio_smt(BB_SDA_PIN, 1);
++	mt_set_gpio_smt(BB_SCL_PIN, 1);
++	mt_set_gpio_ies(BB_SDA_PIN, 1);
++	mt_set_gpio_ies(BB_SCL_PIN, 1);
++	mt_set_gpio_pull_select(BB_SDA_PIN, GPIO_PULL_UP);
++	mt_set_gpio_pull_select(BB_SCL_PIN, GPIO_PULL_UP);
++
++	mt_set_gpio_dir(BB_SDA_PIN, GPIO_DIR_IN);
++	mt_set_gpio_dir(BB_SCL_PIN, GPIO_DIR_IN);
++}
++
++static void bb_start(void)
++{
++	bb_sda(1); bb_delay();
++	bb_scl(1); bb_delay();
++	bb_sda(0); bb_delay();
++	bb_scl(0); bb_delay();
++}
++
++static void bb_stop(void)
++{
++	bb_sda(0); bb_delay();
++	bb_scl(1); bb_delay();
++	bb_sda(1); bb_delay();
++}
++
++/* returns 0 when the slave acknowledged */
++static int bb_write_byte(unsigned char val)
++{
++	int i, nak;
++
++	for (i = 7; i >= 0; i--) {
++		bb_sda((val >> i) & 1);
++		bb_delay();
++		bb_scl(1); bb_delay();
++		bb_scl(0); bb_delay();
++	}
++
++	/* release SDA and sample it during the ack clock */
++	mt_set_gpio_dir(BB_SDA_PIN, GPIO_DIR_IN);
++	bb_scl(1); bb_delay();
++	nak = mt_get_gpio_in(BB_SDA_PIN);
++	bb_scl(0); bb_delay();
++	mt_set_gpio_dir(BB_SDA_PIN, GPIO_DIR_OUT);
++
++	return nak ? -1 : 0;
++}
++
++static int i2c0_bb_write(unsigned char dev, unsigned char *buf, int len)
++{
++	int i, ret;
++
++	bb_pad_init();
++	bb_sda(1);
++	bb_scl(1);
++	UDELAY(200);
++
++	bb_start();
++	ret = bb_write_byte(dev << 1);
++	for (i = 0; i < len; i++)
++		ret |= bb_write_byte(buf[i]);
++	bb_stop();
++
++	/* hand the pads back to the I2C0 function block */
++	mt_set_gpio_mode(BB_SDA_PIN, GPIO_MODE_01);
++	mt_set_gpio_mode(BB_SCL_PIN, GPIO_MODE_01);
++
++	return ret;
++}
++
+ static int TPS65132_write_byte(kal_uint8 addr, kal_uint8 value)
+ {
+-	kal_uint32 ret_code = I2C_OK;
+ 	kal_uint8 write_data[2];
+-	kal_uint16 len;
+ 
+ 	write_data[0] = addr;
+ 	write_data[1] = value;
+ 
+-	TPS65132_i2c.id = I2C_I2C_LCD_BIAS_CHANNEL; /* I2C2; */
+-	/* Since i2c will left shift 1 bit, we need to set FAN5405 I2C address to >>1 */
+-	TPS65132_i2c.addr = (TPS65132_SLAVE_ADDR_WRITE >> 1);
+-	TPS65132_i2c.mode = ST_MODE;
+-	TPS65132_i2c.speed = 100;
+-	len = 2;
+-
+-	ret_code = i2c_write(&TPS65132_i2c, write_data, len);
+-	/* printf("%s: i2c_write: ret_code: %d\n", __func__, ret_code); */
+-
+-	return ret_code;
++	return i2c0_bb_write((TPS65132_SLAVE_ADDR_WRITE >> 1), write_data, 2);
+ }
+ 
+ #else
 diff --git a/include/debug.h b/include/debug.h
-index bef3fd6..355b5ed 100644
+index bef3fd6..1a2af1f 100644
 --- a/include/debug.h
 +++ b/include/debug.h
-@@ -33,7 +33,7 @@
- extern "C" {
- #endif
+@@ -47,7 +47,13 @@ int _dputs(const char *str);
+ int _dprintf(const char *fmt, ...) __PRINTFLIKE(1, 2);
+ int _dvprintf(const char *fmt, va_list ap);
  
--#define DEBUGLEVEL 0
-+#define DEBUGLEVEL 2
- 
- /* debug levels */
- #define CRITICAL 0
-diff --git a/kernel/main.c b/kernel/main.c
-index c2655c5..26c9cef 100644
---- a/kernel/main.c
-+++ b/kernel/main.c
-@@ -1,3 +1,5 @@
-+/* --- early boot breadcrumbs (bring-up diagnosis) --- */
-+#define EARLY_POKE(c) do { *(volatile unsigned char *)0x11002000 = (unsigned char)(c); } while (0)
- /*
-  * Copyright (c) 2008 Travis Geiselbrecht
-  *
-@@ -82,6 +84,7 @@ static void call_constructors(void)
- void kmain(void) __NO_RETURN __EXTERNALLY_VISIBLE;
- void kmain(void)
- {
-+	EARLY_POKE('K');
- #if !defined(MACH_FPGA) && !defined(SB_LK_BRINGUP)
- 	boot_time = get_timer(0);
- #endif
-@@ -94,6 +97,7 @@ void kmain(void)
- 
- 	// do any super early platform initialization
- 	platform_early_init();
-+	EARLY_POKE('I');
- 
- #if defined(MACH_FPGA) || defined(SB_LK_BRINGUP)
- 	boot_time = get_timer(0);
-@@ -101,9 +105,11 @@ void kmain(void)
- 
- 	// do any super early target initialization
- 	target_early_init();
-+	EARLY_POKE('J');
- 
- 	dprintf(INFO, "welcome to lk\n\n");
- 	dprintf(INFO, "LK_VER_TAG = %s\n", LK_VER_TAG);
-+	EARLY_POKE('L');
- 
- 	// deal with any static constructors
- 	dprintf(SPEW, "calling constructors\n");
-@@ -112,10 +118,12 @@ void kmain(void)
- 	// bring up the kernel heap
- 	dprintf(SPEW, "initializing heap\n");
- 	heap_init();
-+	EARLY_POKE('M');
- 
- 	// initialize the threading system
- 	dprintf(SPEW, "initializing threads\n");
- 	thread_init();
-+	EARLY_POKE('N');
- 
- 	// initialize the dpc system
- 	dprintf(SPEW, "initializing dpc\n");
-@@ -124,6 +132,7 @@ void kmain(void)
- 	// initialize kernel timers
- 	dprintf(SPEW, "initializing timers\n");
- 	timer_init();
-+	EARLY_POKE('O');
- 
- #ifdef  MTK_LK_IRRX_SUPPORT
-    mtk_ir_init(0);
+-#if DEBUGLEVEL
++/*
++ * Keep the macros defined even when DEBUGLEVEL is 0: with the old
++ * #if DEBUGLEVEL guard the whole dprintf family compiled away, so even
++ * CRITICAL messages vanished and a hung bootloader was completely mute.
++ * The (level <= DEBUGLEVEL) test below still filters INFO/SPEW out.
++ */
++#if 1
+ #define dputc(level, str) do { if ((level) <= DEBUGLEVEL) { _dputc(str); } } while (0)
+ #define dputs(level, str) do { if ((level) <= DEBUGLEVEL) { _dputs(str); } } while (0)
+ #define dprintf(level, x...) do { if ((level) <= DEBUGLEVEL) { _dprintf(x); } } while (0)
 diff --git a/platform/mt6755/boot_mode.c b/platform/mt6755/boot_mode.c
 index e422e6b..7079c1d 100644
 --- a/platform/mt6755/boot_mode.c
@@ -150,6 +326,767 @@ index 2b9e75a..c158e50 100644
 +	return FALSE;
  }
  
+ 
+diff --git a/platform/mt6755/bq25890.c b/platform/mt6755/bq25890.c
+index 970e301..e50b6dc 100644
+--- a/platform/mt6755/bq25890.c
++++ b/platform/mt6755/bq25890.c
+@@ -36,6 +36,7 @@
+ #include <platform/bq25890.h>
+ #include <printf.h>
+ #include <platform/mt_pumpexpress.h>
++#include <platform/mt_gpio.h>
+ 
+ 
+ #if !defined(CONFIG_POWER_EXT)
+@@ -68,6 +69,446 @@ int g_bq25890_hw_exist=0;
+ #define BQ25890_I2C_ID  I2C1
+ static struct mt_i2c_t bq25890_i2c;
+ 
++/*
++ * The I2C1 controller is unusable from LK on this board: i2c_hw_init() is an
++ * empty stub, so no transfer ever completes and every charger register read
++ * comes back as the register index itself (bq25890_read_byte() pre-seeds
++ * *returnData with cmd). That leaves the charger unconfigured -- the pack
++ * never actually charges and LK keeps tripping its low-voltage gate.
++ *
++ * Clock the bus out by hand on GPIO91 (SDA) / GPIO94 (SCL) instead. Both pads
++ * default to GPIO_MODE_01 (I2C1 function) with SMT off and no pull, which is
++ * useless for bit-banging, so reconfigure them first -- same lesson learned
++ * from the TPS65132 attempt.
++ */
++#define BQ_SDA_PIN	91
++#define BQ_SCL_PIN	94
++
++/* the LCD-bias pads, scanned for comparison */
++#define BB_SDA_PIN_0	92
++#define BB_SCL_PIN_0	93
++
++static void bq_bb_delay(void)
++{
++	udelay(25);		/* ~20 kHz, the FPC pull-ups are weak */
++}
++
++static void bq_bb_sda(int level)
++{
++	if (level) {
++		mt_set_gpio_dir(BQ_SDA_PIN, GPIO_DIR_IN);
++	} else {
++		mt_set_gpio_dir(BQ_SDA_PIN, GPIO_DIR_OUT);
++		mt_set_gpio_out(BQ_SDA_PIN, GPIO_OUT_ZERO);
++	}
++}
++
++static void bq_bb_scl(int level)
++{
++	if (level) {
++		mt_set_gpio_dir(BQ_SCL_PIN, GPIO_DIR_IN);
++	} else {
++		mt_set_gpio_dir(BQ_SCL_PIN, GPIO_DIR_OUT);
++		mt_set_gpio_out(BQ_SCL_PIN, GPIO_OUT_ZERO);
++	}
++}
++
++static void bq_bb_pad_init(void)
++{
++	mt_set_gpio_mode(BQ_SDA_PIN, GPIO_MODE_00);
++	mt_set_gpio_mode(BQ_SCL_PIN, GPIO_MODE_00);
++	mt_set_gpio_smt(BQ_SDA_PIN, 1);
++	mt_set_gpio_smt(BQ_SCL_PIN, 1);
++	mt_set_gpio_ies(BQ_SDA_PIN, 1);
++	mt_set_gpio_ies(BQ_SCL_PIN, 1);
++	mt_set_gpio_pull_select(BQ_SDA_PIN, GPIO_PULL_UP);
++	mt_set_gpio_pull_select(BQ_SCL_PIN, GPIO_PULL_UP);
++	mt_set_gpio_dir(BQ_SDA_PIN, GPIO_DIR_IN);
++	mt_set_gpio_dir(BQ_SCL_PIN, GPIO_DIR_IN);
++}
++
++/*
++ * Standard bus recovery: a slave interrupted mid-byte keeps SDA low and no
++ * START can ever be generated. Clock SCL nine times with SDA released until
++ * the slave shifts out the remaining bits and lets go.
++ */
++static void bq_bb_bus_recover(void)
++{
++	int i;
++
++	mt_set_gpio_dir(BQ_SDA_PIN, GPIO_DIR_IN);
++	for (i = 0; i < 9; i++) {
++		bq_bb_scl(1); bq_bb_delay();
++		bq_bb_scl(0); bq_bb_delay();
++		if (mt_get_gpio_in(BQ_SDA_PIN))
++			break;
++	}
++}
++
++static void bq_bb_start(void)
++{
++	bq_bb_bus_recover();
++	bq_bb_sda(1); bq_bb_delay();
++	bq_bb_scl(1); bq_bb_delay();
++	bq_bb_sda(0); bq_bb_delay();
++	bq_bb_scl(0); bq_bb_delay();
++}
++
++static void bq_bb_stop(void)
++{
++	bq_bb_sda(0); bq_bb_delay();
++	bq_bb_scl(1); bq_bb_delay();
++	bq_bb_sda(1); bq_bb_delay();
++}
++
++/* 0 on ACK */
++static int bq_bb_write_byte(unsigned char val)
++{
++	int i, nak;
++
++	for (i = 7; i >= 0; i--) {
++		bq_bb_sda((val >> i) & 1);
++		bq_bb_delay();
++		bq_bb_scl(1); bq_bb_delay();
++		bq_bb_scl(0); bq_bb_delay();
++	}
++
++	mt_set_gpio_dir(BQ_SDA_PIN, GPIO_DIR_IN);
++	bq_bb_scl(1); bq_bb_delay();
++	nak = mt_get_gpio_in(BQ_SDA_PIN);
++	bq_bb_scl(0); bq_bb_delay();
++	mt_set_gpio_dir(BQ_SDA_PIN, GPIO_DIR_OUT);
++
++	return nak ? -1 : 0;
++}
++
++static int bq_bb_read_byte(unsigned char *out)
++{
++	int i;
++	unsigned char v = 0;
++
++	mt_set_gpio_dir(BQ_SDA_PIN, GPIO_DIR_IN);
++	for (i = 7; i >= 0; i--) {
++		bq_bb_scl(1); bq_bb_delay();
++		v = (v << 1) | (mt_get_gpio_in(BQ_SDA_PIN) ? 1 : 0);
++		bq_bb_scl(0); bq_bb_delay();
++	}
++	/*
++	 * NACK the final byte. Driving SDA low here would tell the slave to
++	 * send yet another byte: it keeps the line driven through our STOP and
++	 * the very next transfer NAKs. That is exactly what the register dump
++	 * showed -- register 0 read back fine, register 1 failed.
++	 */
++	mt_set_gpio_dir(BQ_SDA_PIN, GPIO_DIR_IN);
++	bq_bb_delay();
++	bq_bb_scl(1); bq_bb_delay();
++	bq_bb_scl(0); bq_bb_delay();
++
++	*out = v;
++	return 0;
++}
++
++/* returns I2C_OK / -1 in the driver's convention */
++static int bq_bb_write_reg(unsigned char reg, unsigned char val)
++{
++	int ret;
++
++	bq_bb_pad_init();
++	bq_bb_sda(1); bq_bb_scl(1);
++	udelay(200);
++
++	bq_bb_start();
++	ret = bq_bb_write_byte((BQ25890_SLAVE_ADDR_WRITE >> 1) << 1);
++	ret |= bq_bb_write_byte(reg);
++	ret |= bq_bb_write_byte(val);
++	bq_bb_stop();
++
++	return ret ? -1 : I2C_OK;
++}
++
++static int bq_bb_read_reg(unsigned char reg, unsigned char *val)
++{
++	int ret;
++
++	bq_bb_pad_init();
++	bq_bb_sda(1); bq_bb_scl(1);
++	udelay(200);
++
++	bq_bb_start();
++	ret = bq_bb_write_byte((BQ25890_SLAVE_ADDR_WRITE >> 1) << 1);
++	ret |= bq_bb_write_byte(reg);
++	if (ret) {
++		bq_bb_stop();
++		return -1;
++	}
++
++	bq_bb_start();		/* repeated start */
++	ret = bq_bb_write_byte((BQ25890_SLAVE_ADDR_READ >> 1) << 1);
++	if (ret) {
++		bq_bb_stop();
++		return -1;
++	}
++	bq_bb_read_byte(val);
++	bq_bb_stop();
++
++	return I2C_OK;
++}
++
++/*
++ * One-shot bus survey.
++ *
++ * Every transfer on both bit-banged buses fails, and the failure looks the
++ * same whether the pads are wrong or the chip simply is not there. Enumerate
++ * what answers instead of guessing: mainline already found 0x38/0x3b on the
++ * i2c0 pads and 0x62 on the i2c1 pads, so if LK's scan comes back empty the
++ * pads/timing are at fault; if it finds those same addresses, the bit-bang is
++ * fine and 0x3E / 0x6B are simply unpopulated on this board.
++ */
++static void bb_pads(int sda, int scl)
++{
++	mt_set_gpio_mode(sda, GPIO_MODE_00);
++	mt_set_gpio_mode(scl, GPIO_MODE_00);
++	mt_set_gpio_smt(sda, 1);
++	mt_set_gpio_smt(scl, 1);
++	mt_set_gpio_ies(sda, 1);
++	mt_set_gpio_ies(scl, 1);
++	mt_set_gpio_pull_select(sda, GPIO_PULL_UP);
++	mt_set_gpio_pull_select(scl, GPIO_PULL_UP);
++	mt_set_gpio_dir(sda, GPIO_DIR_IN);
++	mt_set_gpio_dir(scl, GPIO_DIR_IN);
++}
++
++static void bb_low(int pin)
++{
++	mt_set_gpio_dir(pin, GPIO_DIR_OUT);
++	mt_set_gpio_out(pin, GPIO_OUT_ZERO);
++}
++
++/* 1 when the address was acknowledged */
++static int bb_probe(int sda, int scl, unsigned char addr8)
++{
++	int i, ack;
++
++	bb_pads(sda, scl);
++
++	/* start: SDA falls while SCL is high */
++	mt_set_gpio_dir(sda, GPIO_DIR_IN); udelay(25);
++	mt_set_gpio_dir(scl, GPIO_DIR_IN); udelay(25);
++	bb_low(sda); udelay(25);
++	bb_low(scl); udelay(25);
++
++	for (i = 7; i >= 0; i--) {
++		if ((addr8 >> i) & 1)
++			mt_set_gpio_dir(sda, GPIO_DIR_IN);
++		else
++			bb_low(sda);
++		udelay(25);
++		mt_set_gpio_dir(scl, GPIO_DIR_IN); udelay(25);
++		bb_low(scl); udelay(25);
++	}
++
++	mt_set_gpio_dir(sda, GPIO_DIR_IN); udelay(25);
++	mt_set_gpio_dir(scl, GPIO_DIR_IN); udelay(25);
++	ack = mt_get_gpio_in(sda) ? 0 : 1;
++	bb_low(scl); udelay(25);
++
++	/* stop */
++	bb_low(sda); udelay(25);
++	mt_set_gpio_dir(scl, GPIO_DIR_IN); udelay(25);
++	mt_set_gpio_dir(sda, GPIO_DIR_IN); udelay(25);
++
++	return ack;
++}
++
++static void bb_scan_bus(int sda, int scl, const char *tag)
++{
++	char found[128];
++	int addr, n = 0, idle_sda, idle_scl, len;
++	int lo_sda, hi_sda, lo_scl, hi_scl;
++
++	bb_pads(sda, scl);
++	udelay(200);
++	idle_sda = mt_get_gpio_in(sda) ? 1 : 0;
++	idle_scl = mt_get_gpio_in(scl) ? 1 : 0;
++
++	/*
++	 * Is the pad actually ours to drive? Drive 0, read back, release, read
++	 * back. A working pad gives 0 then 1. If driving 0 still reads 1 the
++	 * pin is not muxed to GPIO (or its IO rail is dead) and no amount of
++	 * timing tuning will make the bus work.
++	 */
++	bb_low(sda); udelay(50);
++	lo_sda = mt_get_gpio_in(sda) ? 1 : 0;
++	mt_set_gpio_dir(sda, GPIO_DIR_IN); udelay(50);
++	hi_sda = mt_get_gpio_in(sda) ? 1 : 0;
++
++	bb_low(scl); udelay(50);
++	lo_scl = mt_get_gpio_in(scl) ? 1 : 0;
++	mt_set_gpio_dir(scl, GPIO_DIR_IN); udelay(50);
++	hi_scl = mt_get_gpio_in(scl) ? 1 : 0;
++
++	dprintf(CRITICAL,
++		"i2c-scan %s: pad test sda %d/%d scl %d/%d, idle sda=%d scl=%d\n",
++		tag, lo_sda, hi_sda, lo_scl, hi_scl, idle_sda, idle_scl);
++
++	len = 0;
++	found[0] = 0;
++	for (addr = 0x08; addr < 0x78 && len < (int)sizeof(found) - 6; addr++) {
++		/* bb_probe() returns 1 when the address was acknowledged */
++		if (bb_probe(sda, scl, (unsigned char)(addr << 1))) {
++			len += snprintf(found + len, sizeof(found) - len,
++					" %02x", addr);
++			n++;
++		}
++	}
++
++	dprintf(CRITICAL, "i2c-scan %s: %d dev%s:%s\n",
++		tag, n, n == 1 ? "" : "s", n ? found : " (none)");
++}
++
++/* read one register from an arbitrary 8-bit slave address */
++static int bq_bb_read_reg_at(unsigned char addr8, unsigned char reg,
++			     unsigned char *val)
++{
++	int ret;
++
++	bq_bb_pad_init();
++	bq_bb_sda(1); bq_bb_scl(1);
++	udelay(200);
++
++	bq_bb_start();
++	ret = bq_bb_write_byte(addr8);
++	ret |= bq_bb_write_byte(reg);
++	if (ret) {
++		bq_bb_stop();
++		return -1;
++	}
++
++	/*
++	 * STOP then START rather than a repeated START. The part at 0x62
++	 * acknowledged its address, returned 0x00 for register 0 and then
++	 * failed on register 1 -- the classic signature of a slave that does
++	 * not implement a repeated START. A full STOP in between is the
++	 * portable form and costs two bit times.
++	 */
++	bq_bb_stop();
++	udelay(50);
++	bq_bb_start();
++	ret = bq_bb_write_byte(addr8 | 1);
++	if (ret) {
++		bq_bb_stop();
++		return -1;
++	}
++	bq_bb_read_byte(val);
++	bq_bb_stop();
++
++	return 0;
++}
++
++/*
++ * Read-only fingerprint of whatever answers on the charger bus. Nothing is
++ * written: the driver's register map is a bq25890 one and the chip at 0x62
++ * may well be a different part, so identify it before poking at it.
++ */
++static void bb_dump_chip(unsigned char addr7, const char *tag)
++{
++	unsigned char v;
++	int i;
++
++	if (bq_bb_read_reg_at((unsigned char)(addr7 << 1), 0, &v)) {
++		dprintf(CRITICAL, "i2c-dump %s 0x%02x: no ack\n", tag, addr7);
++		return;
++	}
++
++	dprintf(CRITICAL, "i2c-dump %s 0x%02x:", tag, addr7);
++	dprintf(CRITICAL, " %02x=%02x", 0, v);
++	for (i = 1; i < 16; i++) {
++		if (bq_bb_read_reg_at((unsigned char)(addr7 << 1), i, &v)) {
++			dprintf(CRITICAL, " (fail at 0x%02x)\n", i);
++			return;
++		}
++		dprintf(CRITICAL, " %02x=%02x", i, v);
++	}
++	dprintf(CRITICAL, "\n");
++}
++
++/* write one register at an arbitrary 8-bit slave address */
++static int bq_bb_write_reg_at(unsigned char addr8, unsigned char reg,
++			      unsigned char val)
++{
++	int ret;
++
++	bq_bb_pad_init();
++	bq_bb_sda(1); bq_bb_scl(1);
++	udelay(200);
++
++	bq_bb_start();
++	ret = bq_bb_write_byte(addr8);
++	ret |= bq_bb_write_byte(reg);
++	ret |= bq_bb_write_byte(val);
++	bq_bb_stop();
++
++	return ret ? -1 : 0;
++}
++
++/*
++ * Charger bring-up on the part that actually answers.
++ *
++ * The driver above talks to 0x6B and NAKs on every access, while the bus scan
++ * finds a single device at 0x62 whose register map is bq2589x (see the register
++ * dump in the log). Its REG00 reads 0x00, i.e. IINLIM = 100 mA -- the adapter
++ * is only allowed to deliver half a watt, which is far less than the phone
++ * burns, so the pack discharges even while plugged in.
++ *
++ * Two conservative writes, both read back:
++ *   REG00 = 0x20  -> EN_HIZ=0, IINLIM code 4 = 1000 mA input limit
++ *   REG05 = 0x10  -> ICHG  code 16 = 1024 mA charge current
++ * VREG (REG04) already reads 0x50 = 4.18 V and is left untouched.
++ */
++static void bq_bb_charge_setup(unsigned char addr7)
++{
++	unsigned char a8 = (unsigned char)(addr7 << 1);
++	unsigned char v = 0;
++
++	bq_bb_write_reg_at(a8, 0x00, 0x20);
++	bq_bb_write_reg_at(a8, 0x05, 0x10);
++
++	if (bq_bb_read_reg_at(a8, 0x00, &v) == 0)
++		dprintf(CRITICAL, "i2c-chg: REG00 now 0x%02x (IINLIM code %u)\n",
++			v, (v >> 3) & 0x0F);
++	else
++		dprintf(CRITICAL, "i2c-chg: REG00 readback failed\n");
++
++	if (bq_bb_read_reg_at(a8, 0x05, &v) == 0)
++		dprintf(CRITICAL, "i2c-chg: REG05 now 0x%02x (ICHG code %u)\n",
++			v, v & 0x7F);
++	else
++		dprintf(CRITICAL, "i2c-chg: REG05 readback failed\n");
++
++	if (bq_bb_read_reg_at(a8, 0x0B, &v) == 0)
++		dprintf(CRITICAL, "i2c-chg: status REG0B = 0x%02x\n", v);
++	if (bq_bb_read_reg_at(a8, 0x0A, &v) == 0)
++		dprintf(CRITICAL, "i2c-chg: status REG0A = 0x%02x\n", v);
++}
++
++static void bb_scan_all(void)
++{
++	bb_scan_bus(BB_SDA_PIN_0, BB_SCL_PIN_0, "i2c0(gpio92/93)");
++	bb_scan_bus(BQ_SDA_PIN, BQ_SCL_PIN, "i2c1(gpio91/94)");
++
++	/*
++	 * The scan keeps finding a single responder at 0x62 while the driver
++	 * talks to 0x6B, which is why charging has never worked: every access
++	 * NAKs and the pack just discharges. Identify the part before
++	 * deciding how to drive it.
++	 */
++	bb_dump_chip(0x62, "i2c1");
++
++	/* the only responder on this bus is the charger; give it a usable
++	 * input current limit instead of the 100 mA default */
++	bq_bb_charge_setup(0x62);
++}
++
+ kal_uint32 bq25890_write_byte(kal_uint8 cmd, kal_uint8 writeData)
+ {
+ 	kal_uint32 ret_code = I2C_OK;
+@@ -84,10 +525,10 @@ kal_uint32 bq25890_write_byte(kal_uint8 cmd, kal_uint8 writeData)
+ 	bq25890_i2c.speed = 100;
+ 	len = 2;
+ 
+-	ret_code = i2c_write(&bq25890_i2c, write_data, len);
++	ret_code = bq_bb_write_reg(cmd, writeData);
+ 
+ 	if (I2C_OK != ret_code)
+-		dprintf(INFO, "%s: i2c_write: ret_code: %d\n", __func__, ret_code);
++		dprintf(CRITICAL, "bq25890: write reg 0x%x failed\n", cmd);
+ 
+ 	return ret_code;
+ }
+@@ -96,6 +537,12 @@ kal_uint32 bq25890_read_byte(kal_uint8 cmd, kal_uint8 *returnData)
+ {
+ 	kal_uint32 ret_code = I2C_OK;
+ 	kal_uint16 len;
++	static int scanned;
++
++	if (!scanned) {
++		scanned = 1;
++		bb_scan_all();
++	}
+ 	*returnData = cmd;
+ 
+ 	bq25890_i2c.id = BQ25890_I2C_ID;
+@@ -105,10 +552,10 @@ kal_uint32 bq25890_read_byte(kal_uint8 cmd, kal_uint8 *returnData)
+ 	bq25890_i2c.speed = 100;
+ 	len = 1;
+ 
+-	ret_code = i2c_write_read(&bq25890_i2c, returnData, len, len);
++	ret_code = bq_bb_read_reg(cmd, returnData);
+ 
+ 	if (I2C_OK != ret_code)
+-		dprintf(INFO, "%s: i2c_read: ret_code: %d\n", __func__, ret_code);
++		dprintf(CRITICAL, "bq25890: read reg 0x%x failed\n", cmd);
+ 
+ 	return ret_code;
+ }
+diff --git a/platform/mt6755/ddp_dsi.c b/platform/mt6755/ddp_dsi.c
+index 5cac1bb..519cdee 100644
+--- a/platform/mt6755/ddp_dsi.c
++++ b/platform/mt6755/ddp_dsi.c
+@@ -246,6 +246,7 @@ static void DSI_WaitForNotBusy(DISP_MODULE_ENUM module, void* cmdq)
+ 	//DISPFUNC();
+ 	int i = 0;
+ 	unsigned int tmp = 0;
++	unsigned int timeout = 0;
+ 	if (cmdq) {
+ 		for (i = DSI_MODULE_BEGIN(module); i <= DSI_MODULE_END(module); i++) {
+ 			DSI_POLLREG32(cmdq, &DSI_REG[i]->DSI_INTSTA, 0x80000000, 0x0);
+@@ -259,10 +260,27 @@ static void DSI_WaitForNotBusy(DISP_MODULE_ENUM module, void* cmdq)
+ 	}
+ 
+ 	i = DSI_MODULE_BEGIN(module);
+-	while (1) {
++	/*
++	 * The old loop had no bound. If the display block is unpowered or its
++	 * clocks are off, DSI_INTSTA reads back 0xffffffff, bit31 never clears
++	 * and LK spins here until the watchdog resets the board.
++	 */
++	for (timeout = 0; timeout < 200000; timeout++) {
+ 		tmp = INREG32(&DSI_REG[i]->DSI_INTSTA);
+-		if (!(tmp &0x80000000)) break;
++		if (!(tmp & 0x80000000))	/* BUSY */
++			return;
++		/*
++		 * BUSY is only released once the completion latch has been
++		 * acknowledged. DSI_set_cmdq() fills the queue, kicks START and
++		 * then waits here; the CMD_DONE left behind by that transfer
++		 * keeps BUSY asserted forever unless it is cleared.
++		 * DSI_INTSTA is write-1-to-clear, so writing the single bit is
++		 * safe and leaves the other status bits untouched.
++		 */
++		if (tmp & 0x2)			/* CMD_DONE */
++			OUTREG32(&DSI_REG[i]->DSI_INTSTA, 0x2);
+ 	}
++	dprintf(CRITICAL, "DSI_WaitForNotBusy: TIMEOUT, DSI_INTSTA=0x%08x\n", tmp);
+ }
+ 
+ void DSI_lane0_ULP_mode(DISP_MODULE_ENUM module, void* cmdq, bool enter)
+@@ -1992,6 +2010,19 @@ int ddp_dsi_config(DISP_MODULE_ENUM module, disp_ddp_path_config *config, void *
+ 		_dump_dsi_params(&(_dsi_context[i].dsi_params));
+ 	}
+ 
++	/*
++	 * DSI_MODE_CTRL.MODE is never written anywhere in this driver, so it
++	 * keeps the reset value (1 = sync-pulse *video* mode) even though this
++	 * panel is command mode. The block then runs the video pipeline,
++	 * parks in "Waiting frame data from RDMA for type-1 command" and
++	 * DSI_INTSTA.BUSY never clears -- every DSI_set_cmdq afterwards burns
++	 * its full timeout and no frame is ever sent.
++	 *
++	 * config->dsi_config.mode is the same field the vdo branch below
++	 * compares against CMD_MODE, so it is the authoritative value.
++	 */
++	DSI_SetMode(module, NULL, config->dsi_config.mode);
++
+ 	DSI_PHY_clk_setting(module, NULL, &(config->dsi_config));
+ 	DSI_TXRX_Control(module, NULL, &(config->dsi_config));
+ 	DSI_PS_Control(module, NULL, &(config->dsi_config), config->dst_w, config->dst_h);
+@@ -2020,6 +2051,24 @@ int ddp_dsi_config(DISP_MODULE_ENUM module, disp_ddp_path_config *config, void *
+ 	return 0;
+ }
+ 
++/*
++ * Belt and braces for the command-mode panel: DSI_MODE_CTRL.MODE keeps
++ * falling back to the video-mode reset value somewhere between config and the
++ * first frame, and nothing in this driver ever restores it. Call this right
++ * before a frame is pushed and the readback tells us whether the write sticks.
++ */
++void ddp_dsi_force_cmd_mode(void)
++{
++	int i;
++
++	for (i = DSI_MODULE_BEGIN(DISP_MODULE_DSI0); i <= DSI_MODULE_END(DISP_MODULE_DSI0); i++) {
++		DSI_SetMode(DISP_MODULE_DSI0, NULL, _dsi_context[i].dsi_params.mode);
++		dprintf(CRITICAL, "DSI pre-trigger: want mode %d, MODE_CTRL=0x%08x\n",
++			_dsi_context[i].dsi_params.mode,
++			(unsigned int)INREG32(&DSI_REG[i]->DSI_MODE_CTRL));
++	}
++}
++
+ int ddp_dsi_stop(DISP_MODULE_ENUM module, void *cmdq_handle)
+ {
+ 	//ths caller should call wait_event_or_idle for frame stop event then.
+@@ -2084,6 +2133,23 @@ int ddp_dsi_power_on(DISP_MODULE_ENUM module, void *cmdq_handle)
+ 
+ 			DSI_Reset(module, NULL);
+ 		}
++
++		/*
++		 * DSI_Reset() toggles DSI_COM_CTRL.DSI_RESET, and that puts
++		 * DSI_MODE_CTRL.MODE back to its reset value (1 = sync-pulse
++		 * video mode). This driver never programs the field anywhere
++		 * else, so a command-mode panel ends up with the block running
++		 * the *video* pipeline: it parks in "Waiting frame data from
++		 * RDMA for type-1 command", DSI_INTSTA.BUSY never clears and
++		 * every DSI_set_cmdq afterwards burns its timeout.
++		 *
++		 * ddp_dsi_config() sets the mode too, but that runs before this
++		 * function and is undone by the reset above.
++		 */
++		DSI_SetMode(module, NULL, _dsi_context[i].dsi_params.mode);
++		dprintf(CRITICAL, "DSI mode re-asserted: %d, MODE_CTRL=0x%08x\n",
++			_dsi_context[i].dsi_params.mode,
++			(unsigned int)INREG32(&DSI_REG[i]->DSI_MODE_CTRL));
+ 	}
+ 
+ 	return DSI_STATUS_OK;
+diff --git a/platform/mt6755/disp_lcm.c b/platform/mt6755/disp_lcm.c
+index 90ec050..36207dd 100644
+--- a/platform/mt6755/disp_lcm.c
++++ b/platform/mt6755/disp_lcm.c
+@@ -406,14 +406,25 @@ int disp_lcm_init(disp_lcm_handle *plcm)
+ 			int ret = 0;
+ 			char buffer = 0;
+ 
+-			ret = DSI_dcs_read_lcm_reg_v2(_get_dst_module_by_lcm(plcm), NULL, 0x0A, (UINT8 *)&buffer,1);
+-			if (ret == 0) {
+-				isLCMConnected = 0;
+-				DISPMSG("lcm is not connected\n");
+-			} else {
+-				isLCMConnected = 1;
+-				DISPMSG("lcm is connected\n");
+-			}
++			/*
++			 * Do NOT probe the panel with a DCS read here.
++			 *
++			 * DSI_dcs_read_lcm_reg_v2() issues a read and then waits
++			 * for the panel's BTA response. If nothing comes back the
++			 * DSI controller stays parked in "waiting for read data",
++			 * DSI_INTSTA.BUSY never clears, and every following command
++			 * burns its full timeout -- that is the 25 x
++			 * "DSI_WaitForNotBusy: TIMEOUT, DSI_INTSTA=0x80000002"
++			 * in the log, and it also aborts primary_display_trigger
++			 * so nothing is ever scanned out.
++			 *
++			 * The panel is fixed by the build config (CUSTOM_LK_LCM),
++			 * so there is nothing to discover: assume it is present.
++			 */
++			(void)buffer;
++			ret = 1;
++			isLCMConnected = 1;
++			DISPMSG("lcm assumed connected (DCS read probe skipped)\n");
+ 		}
+ 		if (plcm->params->dsi.edp_panel == 1) {
+ 			isLCMConnected = 1;
+diff --git a/platform/mt6755/include/platform/disp_drv_log.h b/platform/mt6755/include/platform/disp_drv_log.h
+index f79c56e..3570b42 100644
+--- a/platform/mt6755/include/platform/disp_drv_log.h
++++ b/platform/mt6755/include/platform/disp_drv_log.h
+@@ -32,11 +32,14 @@
+ #ifndef __DISP_DRV_LOG_H__
+ #define __DISP_DRV_LOG_H__
+ 
+-#ifdef USER_BUILD
+-#define DISP_DFINFO     (1)
+-#else
++/*
++ * Force CRITICAL. With USER_BUILD defined these messages were INFO, and
++ * DEBUGLEVEL is 0 on this build, so every DISPCHECK/DISPMSG/DISPERR line was
++ * compiled out -- which is why a failing DSI init produced no progress
++ * information at all. Routing them through CRITICAL keeps the volume sane
++ * (only the display path logs this) while making the init flow visible.
++ */
+ #define DISP_DFINFO     (0)
+-#endif
+ 
+ #define DISP_LOG_PRINT(level, sub_module, fmt, arg...)      \
+     do {                                                    \
+diff --git a/platform/mt6755/include/platform/mt_i2c.h b/platform/mt6755/include/platform/mt_i2c.h
+index d46fedb..e1750d4 100644
+--- a/platform/mt6755/include/platform/mt_i2c.h
++++ b/platform/mt6755/include/platform/mt_i2c.h
+@@ -11,7 +11,10 @@
+ #define I2CTAG                "[I2C-LK] "
+ #define I2CLOG(fmt, arg...)   dprintf(INFO,I2CTAG fmt, ##arg)
+ #define I2CMSG(fmt, arg...)   dprintf(SPEW,I2CTAG fmt, ##arg)
+-#define I2CERR(fmt, arg...)   dprintf(ALWAYS,I2CTAG "%d: "fmt, __LINE__, ##arg)
++/* SPEW, not ALWAYS: the charger IC never answers on I2C1, and its retry
++ * loop used to flush hundreds of these lines between every useful one.
++ */
++#define I2CERR(fmt, arg...)   dprintf(SPEW,I2CTAG "%d: "fmt, __LINE__, ##arg)
+ #define I2CFUC()   dprintf(ALWAYS,I2CTAG "%s\n", __FUNCTION__)
+ 
+ #ifdef MACH_FPGA
+diff --git a/platform/mt6755/mt_battery_6353.c b/platform/mt6755/mt_battery_6353.c
+index f29b4f9..03508a5 100644
+--- a/platform/mt6755/mt_battery_6353.c
++++ b/platform/mt6755/mt_battery_6353.c
+@@ -81,7 +81,13 @@
+ #if defined(CUST_BATTERY_LOWVOL_THRESOLD)
+ #define BATTERY_LOWVOL_THRESOLD CUST_BATTERY_LOWVOL_THRESOLD
+ #else
+-#define BATTERY_LOWVOL_THRESOLD             3450
++#define BATTERY_LOWVOL_THRESOLD             3300
++/*
++ * The stock 3450 mV gate kept this board in a power-off/reboot loop at
++ * 3447 mV -- three millivolts short -- because the charger IC (bq25890)
++ * never answers on I2C1 and nothing tops the pack up. 3400 mV is still a
++ * safe discharge floor, so boot and let the kernel take over charging.
++ */
+ #endif
+ 
+ /*****************************************************************************
+diff --git a/platform/mt6755/mt_disp_drv.c b/platform/mt6755/mt_disp_drv.c
+index 8d9fa05..043679b 100644
+--- a/platform/mt6755/mt_disp_drv.c
++++ b/platform/mt6755/mt_disp_drv.c
+@@ -347,9 +347,51 @@ UINT32 mt_get_fb_size(void)
+ }
+ 
+ 
++/*
++ * Temporary bring-up aid.
++ *
++ * The logo that ships in dev/logo is hd720 while this panel is 1080x1920,
++ * so the decompressor refuses it ("Logo data error") and the framebuffer is
++ * handed to the display engine still filled with zeros. A black frame tells
++ * us nothing about whether DSI, the bias rails and the panel are actually
++ * alive, so paint colour bars once instead.
++ */
++static int fb_test_pattern_done;
++
++static void mt_disp_draw_test_pattern(void)
++{
++	static const unsigned int bars[8] = {
++		0xffffffff,	/* white   */
++		0xffffff00,	/* yellow  */
++		0xff00ffff,	/* cyan    */
++		0xff00ff00,	/* green   */
++		0xff0000ff,	/* blue    */
++		0xffff0000,	/* red     */
++		0xffff00ff,	/* magenta */
++		0xff000000,	/* black   */
++	};
++	unsigned int stride = ALIGN_TO(CFG_DISPLAY_WIDTH, MTK_FB_ALIGNMENT);
++	unsigned int *p = (unsigned int *)fb_addr;
++	unsigned int x, y;
++
++	for (y = 0; y < CFG_DISPLAY_HEIGHT; y++) {
++		for (x = 0; x < CFG_DISPLAY_WIDTH; x++)
++			p[y * stride + x] = bars[(x * 8) / CFG_DISPLAY_WIDTH];
++	}
++}
++
+ void mt_disp_update(UINT32 x, UINT32 y, UINT32 width, UINT32 height)
+ {
+ 	unsigned int va = (unsigned int)fb_addr;
++
++	if (!fb_test_pattern_done) {
++		fb_test_pattern_done = 1;
++		if (*(unsigned int *)va == 0 && *(unsigned int *)(va + 4) == 0) {
++			mt_disp_draw_test_pattern();
++			dprintf(CRITICAL, "fb: no logo, drew test pattern\n");
++		}
++	}
++
+ 	dprintf(CRITICAL,"fb dump: 0x%08x, 0x%08x, 0x%08x, 0x%08x\n",
+ 	        *(unsigned int*)va, *(unsigned int*)(va+4), *(unsigned int*)(va+8), *(unsigned int*)(va+0xC));
  
 diff --git a/platform/mt6755/platform.c b/platform/mt6755/platform.c
 index cb6148b..da483fb 100644
@@ -279,10 +1216,35 @@ index cb6148b..da483fb 100644
  	    // Workaround by Weiqi
  	    mt6331_upmu_set_rg_vgp1_en(1);
 diff --git a/platform/mt6755/primary_display.c b/platform/mt6755/primary_display.c
-index 199347a..74ca827 100644
+index 199347a..2c6c3dd 100644
 --- a/platform/mt6755/primary_display.c
 +++ b/platform/mt6755/primary_display.c
-@@ -906,6 +906,11 @@ int primary_display_trigger(int blocking)
+@@ -634,6 +634,16 @@ int primary_display_init(char *lcm_name)
+ 	data_config.dst_dirty = 1;
+ 
+ 	ret = dpmgr_path_config(pgc->dpmgr_handle, &data_config, CMDQ_DISABLE);
++
++	/*
++	 * Bring the DSI PHY up (PLL lock, reset, sleep-out, wakeup) here, not
++	 * before dpmgr_path_config(): DSI_PHY_PLL_Setting() asserts when
++	 * dsi_params.PLL_CLOCK is still 0, which is what the board tripped over
++	 * ("ASSERT at ddp_dsi.c:1117"). At this point the parameters are real,
++	 * and the panel init commands that follow have a working link.
++	 */
++	dpmgr_path_power_on(pgc->dpmgr_handle, CMDQ_DISABLE);
++
+ 	ret = disp_lcm_init(pgc->plcm);
+ 	DISPCHECK("pgc->plcm->is_connected = %d \n",pgc->plcm->is_connected);
+ 	if (primary_display_is_video_mode()) {
+@@ -900,12 +910,19 @@ int primary_display_diagnose(void)
+ 	return ret;
+ }
+ 
++extern void ddp_dsi_force_cmd_mode(void);
++
+ int primary_display_trigger(int blocking)
+ {
+ 	int ret = 0;
  	DISPFUNC();
  	int x=0, y=0;
  	int width = 0, height =0;
@@ -294,17 +1256,152 @@ index 199347a..74ca827 100644
  	x = disp_lcm_x(pgc->plcm);
  	y = disp_lcm_y(pgc->plcm);
  	width = disp_lcm_width(pgc->plcm);
+@@ -922,12 +939,140 @@ int primary_display_trigger(int blocking)
+ 			dpmgr_wait_event_timeout(pgc->dpmgr_handle, DISP_PATH_EVENT_FRAME_DONE, HZ*1);
+ 		}
+ 		DISPCHECK("trigger mode: %s\n", (pgc->mode == DIRECT_LINK_MODE)?"DIRECT_LINK":"SINGLE_LAYER");
++		/*
++		 * Start the path (OVL -> RDMA -> DSI) *before* lcm_update().
++		 *
++		 * lcm_update() ends with 0x2C (write_mem_start), which tells the
++		 * DSI to pull pixel data from the RDMA FIFO. With the stock order
++		 * RDMA is not running yet, so the DSI parks in
++		 *   "Waiting frame data from RDMA for type-1 command"
++		 * and DSI_INTSTA.BUSY stays asserted forever -- every following
++		 * DSI_set_cmdq then burns a full timeout and nothing is ever
++		 * scanned out. That state name is read straight out of the DSI
++		 * status dump in the LK log.
++		 */
++		ddp_dsi_force_cmd_mode();
++		/*
++		 * Vendor order, and it is the right one: lcm_update() queues
++		 * 0x2A/0x2B/0x2C and kicks the DSI, which then parks in
++		 * "Waiting frame data from RDMA for type-1 command" (state
++		 * 0x8) by design. dpmgr_path_start() starts OVL/RDMA and the
++		 * pixels follow. Starting the path first leaves the DSI with
++		 * an empty queue and no frame is ever produced.
++		 */
+ 		disp_lcm_update(pgc->plcm, x, y, width, height, 0);
+ 		dpmgr_path_start(pgc->dpmgr_handle, primary_display_use_cmdq);
++
++		/*
++		 * OVL0_ROI_SIZE reads back as 800x1280 -- the hardware reset
++		 * value -- because OVLConfig_l() only programs it when
++		 * pConfig->dst_dirty is set and this boot path never sets it.
++		 * An 800-pixel ROI against a 1080-pixel RDMA line means the
++		 * FIFO never accumulates a full line and the DSI waits for
++		 * frame data forever.
++		 *
++		 * It has to be written *after* dpmgr_path_start(): that call
++		 * runs OVLStart(), and a write placed before it is back to
++		 * 800x1280 by the time the frame is triggered (verified in
++		 * 39.txt).
++		 */
++		{
++			extern int OVLROI(DISP_MODULE_ENUM module, unsigned int bgW,
++					  unsigned int bgH, unsigned int bgColor,
++					  void *handle);
++			static int roi_forced;
++
++			if (!roi_forced && width && height) {
++				unsigned int scratch_rb, real_rb;
++
++				roi_forced = 1;
++
++				/*
++				 * ROI writability test. L0_ADDR holds our
++				 * framebuffer, so writes to this block do land;
++				 * if the scratch value below is still there on
++				 * readback the register is plainly read-only and
++				 * the ROI has to be programmed some other way.
++				 */
++				OUTREG32((unsigned int *)DISP_REG_OVL_ROI_SIZE, 0x0BADF00D);
++				scratch_rb = INREG32(DISP_REG_OVL_ROI_SIZE);
++
++				OVLROI(DISP_MODULE_OVL0, width, height,
++				       0xFF000000, NULL);
++				real_rb = INREG32(DISP_REG_OVL_ROI_SIZE);
++
++				dprintf(CRITICAL,
++					"display: ROI writability test: scratch=0x%08x, "
++					"after OVLROI=0x%08x (want 0x%08x)\n",
++					scratch_rb, real_rb,
++					((height & 0xFFFF) << 16) | (width & 0xFFFF));
++
++				dprintf(CRITICAL,
++					"display: OVL_SRC_CON=0x%08x FLOW=0x%08x "
++					"ADDCON=0x%08x RDMA_FIFO=0x%08x RDMA_TLINE=0x%08x\n",
++					INREG32(DISP_REG_OVL_SRC_CON),
++					INREG32(DISP_REG_OVL_FLOW_CTRL_DBG),
++					INREG32(DISP_REG_OVL_ADDCON_DBG),
++					INREG32(DISP_REG_RDMA_FIFO_CON),
++					INREG32(DISP_REG_RDMA_TARGET_LINE));
++			}
++		}
+ 		if (primary_display_use_cmdq == CMDQ_DISABLE) {
+ 			dpmgr_path_trigger(pgc->dpmgr_handle, NULL,primary_display_use_cmdq);
+ 		}
+ 
++		/*
++		 * One-shot diagnosis. If the DSI is still busy here, the frame
++		 * data never arrived from the producers, and guessing which of
++		 * OVL/RDMA/CONFIG/MUTEX is at fault is pointless -- dump the
++		 * whole path and read the registers instead.
++		 */
++		{
++			extern int ddp_dsi_is_busy(DISP_MODULE_ENUM module);
++			static int regs_dumped;
++
++			if (!regs_dumped && ddp_dsi_is_busy(DISP_MODULE_DSI0)) {
++				regs_dumped = 1;
++				/*
++				 * dpmgr_check_status() is a no-op in this build
++				 * (DDP_DEBUG_SUPPORT is off, the dump helpers
++				 * are stubbed), so read the registers that
++				 * decide whether a frame can exist at all:
++				 *
++				 *   OVL_EN        - 0 means nothing produces pixels
++				 *   RDMA_GLOBAL   - engine enable
++				 *   RDMA_START    - must be the framebuffer
++				 *   MMSYS_CG0     - engine clock gates
++				 */
++				dprintf(CRITICAL,
++					"display: DSI busy; OVL_EN=0x%08x OVL_DP=0x%08x "
++					"RDMA_GCON=0x%08x RDMA_START=0x%08x RDMA_PITCH=0x%08x "
++					"RDMA_SIZE=0x%08x RDMA_INTSTA=0x%08x CG0=0x%08x\n",
++					INREG32(DISP_REG_OVL_EN),
++					INREG32(DISP_REG_OVL_DATAPATH_CON),
++					INREG32(DISP_REG_RDMA_GLOBAL_CON),
++					INREG32(DISP_REG_RDMA_MEM_START_ADDR),
++					INREG32(DISP_REG_RDMA_MEM_SRC_PITCH),
++					INREG32(DISP_REG_RDMA_SIZE_CON_0),
++					INREG32(DISP_REG_RDMA_INT_STATUS),
++					INREG32(DISP_REG_CONFIG_MMSYS_CG_CON0));
++				/*
++				 * RDMA is in direct-link (MODE_SEL == 0, enum says
++				 * DIRECT_LINK = 0), so address/pitch of 0 are
++				 * correct: OVL is the producer. If OVL's ROI is
++				 * zero or layer 0 is not enabled/pointed at the
++				 * framebuffer, nothing ever reaches the RDMA.
++				 */
++				dprintf(CRITICAL,
++					"display: OVL_ROI=0x%08x L0_CON=0x%08x "
++					"L0_ADDR=0x%08x L0_PITCH=0x%08x\n",
++					INREG32(DISP_REG_OVL_ROI_SIZE),
++					INREG32(DISP_REG_OVL_L0_CON),
++					INREG32(DISP_REG_OVL_L0_ADDR),
++					INREG32(DISP_REG_OVL_L0_PITCH));
++			}
++		}
++
+ 		//_set_cmdq_config_handle_dirty();
+ 		//_reset_cmdq_config_handle();
+ 
 diff --git a/project/k50v1_64_bsp.mk b/project/k50v1_64_bsp.mk
-index 2aa7cb1..d57a243 100644
+index 2aa7cb1..e3d8c16 100644
 --- a/project/k50v1_64_bsp.mk
 +++ b/project/k50v1_64_bsp.mk
-@@ -13,15 +13,16 @@ MTK_KERNEL_POWER_OFF_CHARGING=yes
- MTK_PUMP_EXPRESS_PLUS_SUPPORT := yes
- MTK_BQ25896_SUPPORT := yes
- MTK_LCM_PHYSICAL_ROTATION = 0
--CUSTOM_LK_LCM="nt35695_fhd_dsi_cmd_truly_nt50358"
-+CUSTOM_LK_LCM="nt35695B_fhd_dsi_cmd_auo_nt50358"
- MTK_SECURITY_SW_SUPPORT = yes
+@@ -18,7 +18,7 @@ MTK_SECURITY_SW_SUPPORT = yes
  MTK_VERIFIED_BOOT_SUPPORT = yes
  MTK_SEC_FASTBOOT_UNLOCK_SUPPORT = yes
  MTK_SECURITY_ANTI_ROLLBACK = no
@@ -313,192 +1410,3 @@ index 2aa7cb1..d57a243 100644
  DEBUG := 0
  #DEFINES += WITH_DEBUG_DCC=1
  DEFINES += WITH_DEBUG_UART=1
-+DEFINES += MACH_FPGA_NO_DISPLAY=y
- #DEFINES += WITH_DEBUG_FBCON=1
- #DEFINES += MACH_FPGA=y
- CUSTOM_LK_USB_UNIQUE_SERIAL=no
-diff --git a/scripts/dct/DrvGen.py b/scripts/dct/DrvGen.py
-index 6dfddbc..df517c5 100755
---- a/scripts/dct/DrvGen.py
-+++ b/scripts/dct/DrvGen.py
-@@ -10,6 +10,7 @@ import xml.dom.minidom
- sys.dont_write_bytecode = True
- 
- sys.path.append('.')
-+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'obj'))
- sys.path.append('..')
- 
- from obj.ChipObj import ChipObj
-@@ -32,7 +33,7 @@ from utility.util import LogLevel
- from utility.util import log
- 
- def usage():
--    print '''
-+    print('''
- usage: DrvGen [dws_path] [file_path] [log_path] [paras]...
- 
- options and arguments:
-@@ -41,7 +42,7 @@ dws_path    :    dws file path
- file_path   :    where you want to put generated files
- log_path    :    where to store the log files
- paras        :    parameter for generate wanted file
--'''
-+''')
- 
- def is_oldDws(path, gen_spec):
-     if not os.path.exists(path):
-@@ -50,7 +51,7 @@ def is_oldDws(path, gen_spec):
- 
-     try:
-         root = xml.dom.minidom.parse(dws_path)
--    except Exception, e:
-+    except Exception as e:
-         log(LogLevel.warn, '%s is not xml format, try to use old DCT!' %(dws_path))
-         if len(gen_spec) == 0:
-             log(LogLevel.warn, 'Please use old DCT UI to gen all files!')
-diff --git a/scripts/dct/obj/ClkObj.py b/scripts/dct/obj/ClkObj.py
-index c747922..b23d986 100755
---- a/scripts/dct/obj/ClkObj.py
-+++ b/scripts/dct/obj/ClkObj.py
-@@ -3,7 +3,7 @@
- 
- import re
- import string
--import ConfigParser
-+import configparser as ConfigParser
- 
- import xml.dom.minidom
- 
-diff --git a/scripts/dct/obj/EintObj.py b/scripts/dct/obj/EintObj.py
-index ffda65a..db5f457 100755
---- a/scripts/dct/obj/EintObj.py
-+++ b/scripts/dct/obj/EintObj.py
-@@ -5,7 +5,7 @@ import re
- import os
- import string
- 
--import ConfigParser
-+import configparser as ConfigParser
- import xml.dom.minidom
- 
- from data.EintData import EintData
-diff --git a/scripts/dct/obj/GpioObj.py b/scripts/dct/obj/GpioObj.py
-index 7ddb80c..8b835d6 100755
---- a/scripts/dct/obj/GpioObj.py
-+++ b/scripts/dct/obj/GpioObj.py
-@@ -5,14 +5,13 @@ import re
- import os
- import sys
- import string
--import ConfigParser
-+import configparser as ConfigParser
- import xml.dom.minidom
- 
- 
- from data.GpioData import GpioData
- from data.EintData import EintData
- from ModuleObj import ModuleObj
--import ChipObj
- from utility.util import compare
- from utility.util import sorted_key
- from utility.util import log
-diff --git a/scripts/dct/obj/I2cObj.py b/scripts/dct/obj/I2cObj.py
-index f308fff..c7d6004 100755
---- a/scripts/dct/obj/I2cObj.py
-+++ b/scripts/dct/obj/I2cObj.py
-@@ -4,14 +4,13 @@
- import re
- import string
- import xml.dom.minidom
--import ConfigParser
-+import configparser as ConfigParser
- 
- from ModuleObj import ModuleObj
- #from utility import util
- from utility.util import sorted_key
- from data.I2cData import I2cData
- from data.I2cData import BusData
--import ChipObj
- 
- class I2cObj(ModuleObj):
-     _busList = []
-diff --git a/scripts/dct/obj/KpdObj.py b/scripts/dct/obj/KpdObj.py
-index b22152d..7d5e123 100755
---- a/scripts/dct/obj/KpdObj.py
-+++ b/scripts/dct/obj/KpdObj.py
-@@ -3,7 +3,7 @@
- 
- import re
- import string
--import ConfigParser
-+import configparser as ConfigParser
- import xml.dom.minidom
- 
- from ModuleObj import ModuleObj
-diff --git a/scripts/dct/obj/Md1EintObj.py b/scripts/dct/obj/Md1EintObj.py
-index cb0a3d7..7548244 100755
---- a/scripts/dct/obj/Md1EintObj.py
-+++ b/scripts/dct/obj/Md1EintObj.py
-@@ -1,7 +1,7 @@
- #! /usr/bin/python
- # -*- coding: utf-8 -*-
- 
--import ConfigParser
-+import configparser as ConfigParser
- import string
- import xml.dom.minidom
- from itertools import dropwhile
-diff --git a/scripts/dct/obj/PmicObj.py b/scripts/dct/obj/PmicObj.py
-index 5c0b8ad..44aa231 100755
---- a/scripts/dct/obj/PmicObj.py
-+++ b/scripts/dct/obj/PmicObj.py
-@@ -3,7 +3,7 @@
- 
- import sys, os
- import re
--import ConfigParser
-+import configparser as ConfigParser
- import xml.dom.minidom
- 
- from ModuleObj import ModuleObj
-diff --git a/scripts/dct/obj/PowerObj.py b/scripts/dct/obj/PowerObj.py
-index c1fc060..0defaf5 100755
---- a/scripts/dct/obj/PowerObj.py
-+++ b/scripts/dct/obj/PowerObj.py
-@@ -4,10 +4,9 @@
- import sys,os
- import re
- import string
--import ConfigParser
-+import configparser as ConfigParser
- import xml.dom.minidom
- 
--import ChipObj
- from data.PowerData import PowerData
- from utility.util import log
- from utility.util import LogLevel
-diff --git a/scripts/dct/utility/util.py b/scripts/dct/utility/util.py
-index afb2771..1ae185d 100755
---- a/scripts/dct/utility/util.py
-+++ b/scripts/dct/utility/util.py
-@@ -16,16 +16,16 @@ class LogLevel:
- 
- def log(level, msg):
-     if level == LogLevel.info:
--        print LEVEL_INFO + msg
-+        print(LEVEL_INFO + msg)
-     elif level == LogLevel.warn:
--        print LEVEL_WARN + msg
-+        print(LEVEL_WARN + msg)
-     elif level == LogLevel.error:
--        print LEVEL_ERROR + msg
-+        print(LEVEL_ERROR + msg)
- 
- def compare(value):
-     lst = re.findall(r'\d+', value)
-     if len(lst) != 0:
--        return string.atoi(lst[0])
-+        return int(lst[0])
- 
-     # if can not find numbers
-     return value

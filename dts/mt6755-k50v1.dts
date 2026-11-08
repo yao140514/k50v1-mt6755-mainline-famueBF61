@@ -29,7 +29,59 @@
 	 */
 	chosen: chosen {
 		stdout-path = "serial0";
+		/*
+		 * Deliberately no #address-cells / #size-cells here.
+		 *
+		 * of_n_addr_cells() starts at the node's parent, so for
+		 * /chosen/framebuffer@... it reads these properties from
+		 * /chosen first. Declaring 1/1 here made the framebuffer's
+		 * four-cell reg parse as addr=0 size=0x7e3a0000, which
+		 * of_address_to_resource() rejects -- the kernel printed
+		 * "simple-framebuffer ...: No memory resource" and probe
+		 * failed with -EINVAL on every boot. Left undefined, the
+		 * walk continues up to the root, where 2/2 is declared and
+		 * which is what the node below is written for.
+		 */
 		bootargs = "console=ttyS0,921600n8 earlycon loglevel=8 ignore_loglevel                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      ";
+
+	};
+
+	/*
+	 * Bootloader framebuffer, handed to the kernel as a reserved chunk.
+	 *
+	 * It deliberately does NOT sit under /chosen. Three attempts to make
+	 * that work all failed on the same thing: address translation.
+	 * of_n_addr_cells() steps to the parent *before* reading
+	 * #address-cells, so a /chosen child inherits /chosen's cell count if
+	 * it declares one (1/1 -> "No memory resource"), and even without it
+	 * the reg was never translated into a resource for the platform
+	 * device. Root children are the primary of_platform_populate target,
+	 * so they are unambiguous.
+	 *
+	 * The buffer is described twice on purpose, and neither copy relies on
+	 * reg translation at the simplefb node:
+	 *   - framebuffer-memory carries the region itself and is only
+	 *     referenced by phandle, so of_address_to_resource() runs against
+	 *     a node whose parent is "/" (2 address + 2 size cells).
+	 *   - simplefb prefers "memory-region" over "reg" outright, so the
+	 *     device needs no IORESOURCE_MEM at all.
+	 *
+	 * The address is stable: mblock_reserve_ext() hands out the same
+	 * 0x7e3a0000 on every boot of this image (BOOT_LOGO is pinned to
+	 * hd720, so the memory layout never shifts). 0x7f8000 is one page of
+	 * 1088x1920x4. If BOOT_LOGO or the panel ever changes, update both.
+	 */
+	fb_memory: framebuffer-memory {
+		reg = <0 0x7e3a0000 0 0x7f8000>;
+	};
+
+	framebuffer {
+		compatible = "simple-framebuffer";
+		memory-region = <&fb_memory>;
+		width = <1080>;
+		height = <1920>;
+		stride = <4352>;	/* 1088 * 4, MTK_FB_ALIGNMENT = 32 */
+		format = "x8r8g8b8";
 	};
 
 	/*
@@ -375,6 +427,23 @@
 		no-sd;
 		no-sdio;
 		status = "okay";
+	};
+
+	/*
+	 * TOPRGU watchdog.
+	 *
+	 * The driver does not start the timer at probe: mtk_wdt_init() only
+	 * marks it running when the bootloader left WDT_MODE_EN set. What we
+	 * want it for is the restart handler, which pokes WDT_SWRST
+	 * (0x10007014) with key 0x1209 -- the hard reset this SoC honours.
+	 *
+	 * PSCI installs its own handler for SYSTEM_RESET first, but it returns
+	 * NOTIFY_DONE when ATF refuses the call, so the notifier chain falls
+	 * through to this one and "reboot" stops needing the power key.
+	 */
+	watchdog: watchdog@10007000 {
+		compatible = "mediatek,mt6589-wdt";
+		reg = <0 0x10007000 0 0x1000>;
 	};
 
 };

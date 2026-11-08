@@ -1,179 +1,91 @@
-# SMP 调研记录
+# SMP on MT6755 (mainline)
 
-目标：让 8 个 Cortex-A53 都跑起来。当前只能 `maxcpus=1`。
+**Status: done. 8 cores at boot.** `smp: Brought up 1 node, 8 CPUs`.
 
-## 已确认的事实
+## The finding
 
-```
-[0.000000] psci: probing for conduit method from DT.
-[0.000000] psci: PSCIv0.2 detected in firmware.
-[0.000000] psci: Using standard PSCI v0.2 function IDs
-[0.000000] psci: Trusted OS migration not required
-```
+ATF's PSCI `CPU_ON` on this board does nothing to the power controller:
 
-- ATF 实现了**真正的 PSCI v0.2**（不是空壳）
-- `echo 1 > /sys/devices/system/cpu/cpu1/online` 返回 `EIO`
-- `dmesg`：`CPU1: failed to come online` / `CPU1: failed in unknown state : 0x0`
-- `CPU_ON` 返回码为 0（SUCCESS），说明 ATF **收下了请求但核没有运行**
+- `psci_ops.cpu_on()` returns `SUCCESS`
+- `MP0_CPUx_PWR_CON` reads back **unchanged** (`PWR_RST_B` still 0)
 
-## 关键发现：CPU1 的电源域是关的
-
-厂商 `mt-smp.c` 在 `mt_smp_prepare_cpus()` 里调用 `spm_mtcmos_cpu_init()`，
-由 OS 自己负责打开 CPU 的 MTCMOS 电源域——ATF 不做这件事。
-
-实测 SPM 状态寄存器（只读）：
+The core never leaves reset, never writes `secondary_data.status`, and Linux
+reports:
 
 ```
-0x10006180 (SPM_PWR_STATUS) = 0x2A40E34D
+CPU1: failed to come online
+CPU1: failed in unknown state : 0x0
 ```
 
-按位拆开：
+`failed in unknown state : 0x0` is specifically a *successful* PSCI call that
+produced no running core -- an ATF error would print
+`failed to boot CPU1 (-5)` instead.
 
-| 位 | 名称 | 值 |
-|---|---|---|
-| 8 | `MP0_CPUTOP_PWR_STA` | 1（cluster 供电） |
-| 9 | `MP0_CPU0_PWR_STA` | 1（CPU0 供电） |
-| 10 | `MP0_CPU1_PWR_STA` | **0（CPU1 断电）** |
-| 14 | `MCU_PWR_STA` | 1 |
+## Where the fix lives
 
-这与 `CPU_ON` 返回成功但核不启动完全吻合。
-
-## SPM 寄存器表（MT6755）
-
-来自 vendor `mt_spm_reg_mt6755.h`：
-
-```
-SPM_BASE            = 0x10006000
-POWERON_CONFIG_EN   = +0x000    写 (0xb16 << 16) | 1 解锁
-PWR_STATUS          = +0x180
-PWR_STATUS_2ND      = +0x184
-MP0_CPUTOP_PWR_CON  = +0x204
-MP0_CPU1_PWR_CON    = +0x20C
-MP0_CPU1_L1_PDN     = +0x24C
-```
-
-`PWR_CON` 位定义（**注意与老平台不同，PWR_ON 在 bit2**）：
-
-```
-bit0 PWR_RST_B
-bit1 PWR_ISO
-bit2 PWR_ON
-bit3 PWR_ON_2ND
-bit4 PWR_CLK_DIS
-bit5 SRAM_CKISO
-bit6 SRAM_ISOINT_B
-```
-
-## 厂商的 CPU1 上电序列
-
-`spm_mtcmos_ctrl_cpu1(STA_POWER_ON)` 的核心步骤：
+`arch/arm64/kernel/psci.c`, in `cpu_psci_cpu_boot()`, right after the PSCI
+call returns:
 
 ```c
-SPM_POWERON_CONFIG_EN = (0xb16 << 16) | 1;
-
-/* cluster 没上电就先上 */
-if (!(PWR_STATUS & MP0_CPUTOP_PWR_STA))
-        spm_mtcmos_ctrl_cpusys0(STA_POWER_ON);
-
-MP0_CPU1_PWR_CON |= PWR_ON | PWR_ON_2ND;
-while (!(PWR_STATUS & MP0_CPU1_PWR_STA)) ;
-
-MP0_CPU1_PWR_CON &= ~PWR_ISO;
-MP0_CPU1_L1_PDN  &= ~0x1;                    /* SRAM 退出掉电 */
-while (MP0_CPU1_L1_PDN & MP0_CPU1_SRAM_PDN_ACK) ;
-udelay(1);
-MP0_CPU1_PWR_CON |= SRAM_ISOINT_B;
-MP0_CPU1_PWR_CON &= ~SRAM_CKISO;
+if (!err)
+        mt6755_secondary_boot(cpu);
 ```
 
-## 未验证的尝试
+This is the only place where the timing works. `__cpu_up()` then waits
+`wait_for_completion_timeout(&cpu_running, 5000ms)` and afterwards sets
+`secondary_data.task = NULL`. A secondary starting outside that window finds
+`task == NULL` in `head.S`:
 
-1. **`INFRACFG_AO + 0x800` 写 boot address**（厂商 `smp_set_boot_addr()` 的行为）
-   ```
-   devmem 0x10001800 32 0x40e034a8     # secondary_entry 的物理地址
-   devmem 0x10001800                   # 读回 0x00000000 —— 写不进去
-   ```
-   该寄存器被安全策略挡住或偏移不对，此路不通。
+```
+ldr x2, [x0, #CPU_BOOT_TASK]
+cbz x2, __secondary_too_slow
+```
 
-2. **SPM MTCMOS 上电**（尚未执行）
-   ```
-   devmem 0x10006000 32 0xB1600001
-   v=$(devmem 0x1000620C); devmem 0x1000620C 32 $((v | 0xC))
-   sleep 1; devmem 0x10006180          # 看 bit10
-   v=$(devmem 0x1000620C); devmem 0x1000620C 32 $((v & ~0x2))
-   devmem 0x1000624C 32 0x0
-   sleep 1
-   v=$(devmem 0x1000620C); devmem 0x1000620C 32 $((v | 0x40))
-   v=$(devmem 0x1000620C); devmem 0x1000620C 32 $((v & ~0x20))
-   echo 1 > /sys/devices/system/cpu/cpu1/online
-   ```
-   有风险：SPM 是整机电源核心，写错可能掉电。
+and parks in a `wfe/wfi` loop -- board alive, CPU never appears. Userspace
+always races that window; the kernel hook cannot.
 
-3. **缓存一致性**：即使核起来了，厂商在 PSCI 路径下还会做
-   ```c
-   mcusys_smc_write_phy(MP0_AXI_CONFIG, readl(MP0_AXI_CONFIG) & ~ACINACTM);
-   REG_WRITE(CCI400_SI4_SNOOP_CONTROL, ... | SNOOP_REQ | DVM_MSG_REQ);
-   while (readl(CCI400_STATUS) & CHANGE_PENDING) ;
-   ```
-   `MP0_AXI_CONFIG` 需要 SMC 进 ATF 才能写（非安全态写不进），
-   CCI-400 的基址也还没确认。这一步不做，多核会各跑各的 cache。
+## The sequence (vendor `spm_mtcmos_ctrl_cpuN(STA_POWER_ON)`)
 
-## 可能的后续路线
+SPM base `0x10006000`. Unlock first: `POWERON_CONFIG_EN(0x000) = 0xB1600001`.
 
-| 路线 | 前提 | 代价 |
+| step | register | value |
 |---|---|---|
-| SPM 上电 + PSCI | ATF 的 CPU_ON 只差电源 | 小，值得先试 |
-| 内核里补 mrc | 需要 `mcusys_smc_write` 的 SMC ID | 中，要去 vendor 的 `mt_secure_api.h` 反推 |
-| LK 做 spin-table | LK 能在 ATF 之前放出从核 | 大，且要反复刷 LK |
+| 1 | `PWR_CON` | set `PWR_ON`(bit2) + `PWR_ON_2ND`(bit3) |
+| 2 | `PWR_STATUS`(0x180) / `_2ND`(0x184) | wait both bits set |
+| 3 | `PWR_CON` | clear `PWR_ISO`(bit1) |
+| 4 | `L1_PDN` | clear `SRAM_PDN`(bit0), wait `ACK`(bit8) clear |
+| 5 | -- | `udelay(1)` |
+| 6 | `PWR_CON` | set `SRAM_ISOINT_B`(bit6) |
+| 7 | `PWR_CON` | clear `SRAM_CKISO`(bit5) |
+| 8 | `PWR_CON` | clear `PWR_CLK_DIS`(bit4) |
+| 9 | `PWR_CON` | set `PWR_RST_B`(bit0) -- the one ATF skips |
 
-目前建议按 1 → 2 → 3 的顺序试。
+Offsets:
 
-## 运行时方案（已实现，待验证）
+| cpu | `PWR_CON` | `L1_PDN` | `PWR_STATUS` bit |
+|---|---|---|---|
+| 0..3 | 0x208 + n*4 | 0x248 + n*4 | 9 + n |
+| 4..7 | 0x21C + (n-4)*4 | 0x260 + (n-4)*4 | 14 + (n-4) |
 
-`scripts/smp_on.sh` 用 devmem 复现厂商的上电序列，然后热插拔上线——**不改内核**。
+Cluster: `MP0_CPUTOP` 0x204 / L2 0x240 (status bit 8),
+`MP1_CPUTOP` 0x218 / L2 0x258 (status bit 13).
 
-```sh
-# 在设备上（镜像里已带 /smp_on.sh）
-sh /smp_on.sh 1          # 先只上 CPU1，风险最小
-sh /smp_on.sh 1 2 3      # MP0 的三个从核
-sh /smp_on.sh all        # 1..7
-```
+## Cores powered but not online
 
-脚本对每个核做：
+At cold boot `PWR_STATUS` already reports `MP1_CPU0` (bit14) and `MP1_CPU1`
+(bit15) as on, yet neither is online -- ATF left them powered with reset
+released, parked outside Linux. Handing those to PSCI does nothing, so they
+are cycled first: set `PWR_ISO`+`SRAM_CKISO`, clear `SRAM_ISOINT_B`, set
+`SRAM_PDN`, clear `PWR_RST_B`, set `PWR_CLK_DIS`, clear `PWR_ON`/`PWR_ON_2ND`,
+`mdelay(1)`.
 
-```
-1. cluster（CPUTOP）没上电就先上       bit8(MP0) / bit15(MP1)
-2. PWR_CON |= PWR_ON | PWR_ON_2ND      bit2|bit3，等 PWR_STATUS 对应位
-3. PWR_CON &= ~PWR_ISO                 bit1
-4. L1_PDN &= ~SRAM_PDN                 bit0，等 ACK(bit8) 归 0
-5. PWR_CON |= SRAM_ISOINT_B            bit6
-   PWR_CON &= ~SRAM_CKISO              bit5
-6. echo 1 > /sys/devices/system/cpu/cpuN/online   ← 交给 PSCI
-```
+## cmdline
 
-第 6 步是真正的考验：如果 MTCMOS 是唯一缺的东西，`CPU_ON` 这次就会成功。
+`maxcpus=8`. The old `maxcpus=1` was a workaround for this bug and is gone.
 
-### 上电状态位对照
+## The userspace script
 
-| 核 | PWR_STATUS 位 | 掩码 | PWR_CON | L1_PDN |
-|---|---|---|---|---|
-| MP0_CPUTOP | 8 | 0x100 | 0x10006204 | — |
-| CPU0 | 9 | 0x200 | 0x10006208 | 0x10006248 |
-| CPU1 | 10 | 0x400 | 0x1000620C | 0x1000624C |
-| CPU2 | 11 | 0x800 | 0x10006210 | 0x10006250 |
-| CPU3 | 12 | 0x1000 | 0x10006214 | 0x10006254 |
-| MP1_CPUTOP | 15 | 0x8000 | 0x10006218 | — |
-| CPU4 | 16 | 0x10000 | 0x1000621C | 0x10006260 |
-| CPU5 | 17 | 0x20000 | 0x10006220 | 0x10006264 |
-| CPU6 | 18 | 0x40000 | 0x10006224 | 0x10006268 |
-| CPU7 | 19 | 0x80000 | 0x10006228 | 0x1000626C |
-
-### 如果这一步成功，再考虑固化
-
-运行时上电有个副作用：**启动阶段仍然是单核**（内核在 `smp_init()` 时只看到 CPU0），
-所有启动期的并行初始化都享受不到。真要吃到 8 核，需要在
-`drivers/firmware/psci/psci.c` 的 `cpu_psci_cpu_boot()` 之前插一个
-`mtk_mtcmos_cpu_on(cpu)` 钩子，让内核在每次 `CPU_ON` 前先把电源域打开。
-
-但先验证脚本能起来再说——如果 `CPU_ON` 仍然失败，说明还缺 CCI-400 一致性，
-那就要另做功课。
+`scripts/smp_on.sh` is kept as a rescue tool (`dump`, `peek <addr>`, `all`).
+It does the same sequence through `/dev/mem` and reproduces the timing window
+with `echo 1 > online &` + `sleep 1` + release reset. On a normal boot it is
+a no-op.

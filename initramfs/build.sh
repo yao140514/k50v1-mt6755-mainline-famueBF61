@@ -9,7 +9,10 @@ OUT=$PROJ/out/initramfs.cpio.gz
 BUSYBOX=${BUSYBOX:-$HOME/mt6755/busybox-1.37.0/busybox}
 
 rm -rf "$ROOT"
-mkdir -p "$ROOT"/{dev,proc,sys,tmp,bin,sbin,etc,mnt,root}
+# One mkdir per directory: /bin/sh is dash here and has no brace expansion.
+for d in dev proc sys tmp bin sbin etc mnt root; do
+	mkdir -p "$ROOT/$d"
+done
 
 # Bake the build time into the binary: there is no RTC driver on this board,
 # and apt/TLS validation needs a clock that is at least close to real time.
@@ -25,6 +28,12 @@ if [ -x "$BUSYBOX" ]; then
 	ln -sf busybox "$ROOT/bin/sh"
 else
 	echo "WARNING: busybox not found at $BUSYBOX -- image will have no shell"
+fi
+
+# Runtime SMP bring-up helper (powers on CPU MTCMOS via SPM, then hotplugs).
+if [ -f "$PROJ/../repo/scripts/smp_on.sh" ]; then
+	cp "$PROJ/../repo/scripts/smp_on.sh" "$ROOT/smp_on.sh"
+	chmod 755 "$ROOT/smp_on.sh"
 fi
 
 cd "$ROOT"

@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/sysmacros.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <signal.h>
 #include <unistd.h>
@@ -956,6 +957,17 @@ static int wf(const char *path, const char *val)
  * on a new path fails silently with ENOENT, which is why /bin/alpine and
  * /sbin/reboot never appeared on the first try.
  */
+/*
+ * Progress marker. init is the only thing on the console at this point, and
+ * when something blocks the last printed line is the whole diagnosis -- so
+ * every stage after the gadget is announced explicitly and flushed.
+ */
+static void mark(const char *what)
+{
+	printf("  [init] %s\n", what);
+	fflush(stdout);
+}
+
 static int wfile(const char *path, const char *val)
 {
 	int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
@@ -1530,6 +1542,14 @@ static void usb_gadget_setup(void)
 		 * the rest of the census) hostage for that.
 		 */
 		if (fork() == 0) {
+			/*
+			 * setsid() drops the controlling terminal and the delay
+			 * lets the parent exec the shell first: otherwise this
+			 * child and the shell compete for /dev/console and the
+			 * prompt can end up lost behind DHCP output.
+			 */
+			setsid();
+			usleep(3000 * 1000);
 			usb_net_setup();
 			_exit(0);
 		}
@@ -1553,6 +1573,7 @@ static void usb_gadget_setup(void)
 	 * every TLS handshake fails with "certificate not yet valid". Park it
 	 * on a sane floor and let NTP correct it once the link is up.
 	 */
+	mark("time seed");
 	{
 		struct timeval tv;
 
@@ -1569,7 +1590,9 @@ static void usb_gadget_setup(void)
 	else
 		printf("  no default route yet -- NTP skipped\n");
 
+	mark("mounting userdata");
 	mount_userdata();
+	mark("installing helper scripts");
 	install_alpine_helper();
 
 	{
@@ -1586,6 +1609,7 @@ static void usb_gadget_setup(void)
 	 * in write() until the host opens the port, which is exactly what we
 	 * want: nothing is lost before someone is listening.
 	 */
+	mark("spawning ttyGS0 shell");
 	{
 		pid_t p = fork();
 
@@ -1616,19 +1640,39 @@ static void usb_gadget_setup(void)
 /*
  * Helpers that make the board pleasant to drive from a shell.
  *
- * reboot/poweroff deliberately go through /proc/sysrq-trigger. PID 1 here is
- * a plain busybox sh, and busybox's own reboot applet, when it is *not* PID 1,
- * signals init instead of calling reboot(2) -- which is why the only way to
- * restart this board used to be holding the power button for ten seconds.
+ * reboot/poweroff are shell wrappers because PID 1 here is a plain busybox sh,
+ * and busybox's own reboot applet, when it is *not* PID 1, only signals init
+ * instead of calling reboot(2).  poweroff still goes through sysrq; reboot
+ * cannot, see the comment on reboot_sh below.
  */
 static void install_tools(void)
 {
+	/*
+	 * Reboot by writing TOPRGU directly, not through PSCI.
+	 *
+	 * do_kernel_restart() walks the notifier chain in descending priority
+	 * order: PSCI's SYSTEM_RESET registers at 129, the MTK watchdog at 128.
+	 * On this board ATF's SYSTEM_RESET neither returns nor resets anything,
+	 * so the chain stalls on it and the watchdog handler is never reached --
+	 * "rebooting..." followed by a dead board and not even the
+	 * "Reboot failed -- System halted" line.
+	 *
+	 * What the watchdog driver would have done is: clear WDT_MODE.IRQ_EN so
+	 * the write below produces a reset instead of an interrupt, unlock the
+	 * register with the 0x22000000 key, then write 0x1209 to WDT_SWRST.
+	 * Both keys are identical in LK and in the mainline driver.
+	 */
 	static const char *reboot_sh =
 		"#!/bin/sh\n"
 		"echo 'rebooting...'\n"
 		"sync\n"
-		"echo s > /proc/sysrq-trigger 2>/dev/null\n"
-		"sleep 1\n"
+		"M=$(devmem 0x10007000 2>/dev/null)\n"
+		"if [ -n \"$M\" ]; then\n"
+		"  devmem 0x10007000 32 $(( (M & ~8) | 0x22000000 )) 2>/dev/null\n"
+		"  devmem 0x10007014 32 0x1209 2>/dev/null\n"
+		"  sleep 2\n"
+		"fi\n"
+		"echo 'TOPRGU reset failed, trying sysrq'\n"
 		"echo b > /proc/sysrq-trigger\n";
 	static const char *poweroff_sh =
 		"#!/bin/sh\n"
@@ -1700,11 +1744,64 @@ static void install_tools(void)
 		printf("  WARN: /bin/distro was not installed\n");
 }
 
+static void print_banner(void)
+{
+	static const char rule[] =
+		"==============================================================";
+	struct utsname u;
+	char msg[320];
+	int fd, n;
+
+	/*
+	 * Taken from uname() rather than hard-coded: after a reflash a stale
+	 * banner claiming an older build is worse than no banner at all.
+	 */
+	if (uname(&u) != 0) {
+		strcpy(u.release, "?");
+		strcpy(u.version, "?");
+	}
+
+	/*
+	 * Go through /dev/kmsg instead of printf().  printk echoes the record
+	 * to the console as well, so this shows up in the serial transcript
+	 * *and* in dmesg -- with a timestamp, and without printing twice.
+	 * Plain printf() only ever reaches the console, which is why dmesg
+	 * used to show just the summary line.
+	 */
+	/*
+	 * Two lines for the version on purpose: with LOCALVERSION set the
+	 * release and the build stamp together reach 79 columns, and printk
+	 * adds a "[    8.650477] " prefix on top, which wraps an 80-column
+	 * terminal and tears the box apart.
+	 */
+	n = snprintf(msg, sizeof(msg),
+		     "%s\n"
+		     " MT6755 mainline   by yao140514\n"
+		     " Linux %s\n"
+		     " %s\n"
+		     "%s\n",
+		     rule, u.release, u.version, rule);
+	if (n <= 0)
+		return;
+	if (n >= (int)sizeof(msg))
+		n = sizeof(msg) - 1;
+
+	fd = open("/dev/kmsg", O_WRONLY);
+	if (fd < 0) {
+		/* no devtmpfs yet -- fall back to the console */
+		printf("%s", msg);
+		fflush(stdout);
+		return;
+	}
+	(void)!write(fd, msg, (size_t)n);
+	close(fd);
+}
+
 int main(void)
 {
 	printf("\n\n");
 	printf("******************************************************\n");
-	printf("**  mainline Linux on MT6750 / k50v1_64_bsp         **\n");
+	printf("**  mainline Linux on MT6755 / k50v1_64_bsp         **\n");
 	printf("**  userspace is alive: this is PID 1               **\n");
 	printf("******************************************************\n");
 
@@ -1714,6 +1811,14 @@ int main(void)
 	mount("proc", "/proc", "proc", 0, "");
 	mount("sysfs", "/sys", "sysfs", 0, "");
 	mount("devtmpfs", "/dev", "devtmpfs", 0, "");
+	/*
+	 * uname() reports this as the nodename -- the field right after
+	 * "Linux" in `uname -a`.  Nothing sets it at boot, so it reads
+	 * "(none)" until someone calls hostname(1) by hand.
+	 */
+	if (sethostname("k50v1", 5) != 0)
+		printf("  sethostname failed: errno %d (%s)\n",
+		       errno, strerror(errno));
 	/*
 	 * telnetd allocates a pty per connection, so devpts has to exist
 	 * before it starts -- without it telnetd exits silently and the port
@@ -1833,7 +1938,8 @@ int main(void)
 	 * Hand the console over to an interactive shell. Everything above is
 	 * the boot census; from here on the board is usable.
 	 */
-	printf("\n*** census done, handing the console to /bin/sh ***\n");
+	printf("*** census done, handing the console to /bin/sh ***\n");
+	print_banner();
 	fflush(stdout);
 	/*
 	 * Do NOT run `busybox --install` here again: it recreates
@@ -1864,6 +1970,7 @@ int main(void)
 	setenv("HOME", "/", 1);
 	setenv("TERM", "vt100", 1);
 	setenv("ENV", "/etc/profile", 1);
+	mark("starting console shell");
 	execl("/bin/busybox", "busybox", "sh", "-i", NULL);
 	printf("exec /bin/busybox failed: errno %d (%s)\n", errno, strerror(errno));
 	printf("*** idling ***\n");
