@@ -1,0 +1,73 @@
+/*
+ * PMIC state dump (MT6353) -- temporary bring-up helper.
+ *
+ * Neither the touch controller nor an external charger answers on i2c, so the
+ * remaining suspects are the PMIC rails: the touch supply (very likely
+ * VLDO28, the classic 2.8 V panel/touch rail) and the integrated charger.
+ * This prints the charger control block, the enable state of every LDO that
+ * could feed the touch/panel, and the AUXADC battery voltage, right after
+ * pmic_init() in platform_init().
+ *
+ * Call from platform.c:  pmic_dump_all();
+ */
+
+#include <platform/mt_typedefs.h>
+#include <platform/mt_pmic.h>
+#include <platform/mt6353_hw.h>
+#include <printf.h>
+
+struct pmic_reg {
+	unsigned int addr;
+	const char *name;
+};
+
+static const struct pmic_reg chr_regs[] = {
+	{ MT6353_CHR_CON0, "CHR_CON0" },
+	{ MT6353_CHR_CON1, "CHR_CON1" },
+	{ MT6353_CHR_CON2, "CHR_CON2" },
+	{ MT6353_CHR_CON3, "CHR_CON3" },
+	{ MT6353_CHR_CON4, "CHR_CON4" },
+	{ MT6353_CHR_CON5, "CHR_CON5" },
+	{ MT6353_CHR_CON6, "CHR_CON6" },
+	{ MT6353_CHR_CON7, "CHR_CON7" },
+	{ MT6353_CHR_CON8, "CHR_CON8" },
+	{ MT6353_CHR_CON9, "CHR_CON9" },
+};
+
+static const struct pmic_reg ldo_regs[] = {
+	/* the classic 2.8V panel/touch rails */
+	{ MT6353_LDO_SHARE_VLDO28_CON0, "LDO_SHARE_VLDO28_CON0" },
+	{ MT6353_LDO1_VLDO28_CON0,      "LDO1_VLDO28_CON0" },
+	/* other rails that commonly feed touch/panel/sensors */
+	{ MT6353_LDO3_VCN28_CON0,       "LDO3_VCN28_CON0" },
+	{ MT6353_LDO_SHARE_VCN33_CON0,  "LDO_SHARE_VCN33_CON0" },
+	{ MT6353_LDO3_VTCXO28_CON0,     "LDO3_VTCXO28_CON0" },
+	{ MT6353_LDO3_VXO22_CON0,       "LDO3_VXO22_CON0" },
+	{ MT6353_LDO3_VRF18_CON0,       "LDO3_VRF18_CON0" },
+	/* overall enable status */
+	{ MT6353_EN_STATUS1,            "EN_STATUS1" },
+	{ MT6353_EN_STATUS2,            "EN_STATUS2" },
+};
+
+static void dump_regs(const struct pmic_reg *regs, int n)
+{
+	int i;
+
+	for (i = 0; i < n; i++) {
+		unsigned int v = 0;
+
+		if (pmic_read_interface(regs[i].addr, &v, 0xFFFF, 0) == 0)
+			printf("[PMIC] %-24s = 0x%04x\n", regs[i].name, v);
+		else
+			printf("[PMIC] %-24s read failed\n", regs[i].name);
+	}
+}
+
+void pmic_dump_all(void)
+{
+	printf("[PMIC] --- MT6353 charger block ---\n");
+	dump_regs(chr_regs, ARRAY_SIZE(chr_regs));
+
+	printf("[PMIC] --- LDO enables (touch power suspects) ---\n");
+	dump_regs(ldo_regs, ARRAY_SIZE(ldo_regs));
+}
