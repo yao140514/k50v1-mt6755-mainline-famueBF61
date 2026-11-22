@@ -45,10 +45,15 @@ static int axs_probe(struct i2c_client *client)
 			 "reset gpio: dir=%s raw_before=%d\n",
 			 gpiod_get_direction(reset) ? "in" : "out",
 			 gpiod_get_value_cansleep(reset));
-		/* assert, then release, and give the firmware time to boot */
-		gpiod_set_value_cansleep(reset, 0);
-		msleep(30);
+		/*
+		 * With the DT flag as active-high, logical 1 drives the pad high
+		 * = reset asserted, logical 0 = line low = running (this is how
+		 * Android keeps the pin during normal operation).  Pulse high,
+		 * then land back on low.
+		 */
 		gpiod_set_value_cansleep(reset, 1);
+		msleep(30);
+		gpiod_set_value_cansleep(reset, 0);
 		msleep(150);
 		dev_info(&client->dev, "reset released (gpio now %d)\n",
 			 gpiod_get_value_cansleep(reset));
