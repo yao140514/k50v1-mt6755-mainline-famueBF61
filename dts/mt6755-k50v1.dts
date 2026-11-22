@@ -42,7 +42,7 @@
 		 * walk continues up to the root, where 2/2 is declared and
 		 * which is what the node below is written for.
 		 */
-		bootargs = "console=ttyS0,921600n8 console=tty0 earlycon loglevel=7 ignore_loglevel clk_ignore_unused pd_ignore_unused fbcon=map:0                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      ";
+		bootargs = "console=ttyS0,921600n8 console=tty0 earlycon loglevel=7 ignore_loglevel clk_ignore_unused pd_ignore_unused fbcon=map:0 logo.nologo                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      ";
 
 	};
 
@@ -71,15 +71,21 @@
 	 * hd720, so the memory layout never shifts). 0x7f8000 is one page of
 	 * 1088x1920x4. If BOOT_LOGO or the panel ever changes, update both.
 	 */
+	/*
+	 * The top 80 rows (80 * 1920 * 4 = 0x25800 bytes) of the LK buffer are
+	 * the permanent status bar drawn by mt6755_disp_dbg.  The console
+	 * framebuffer starts below them, so scrolling text can never cover
+	 * the bar.  Height therefore shrinks 800 -> 720.
+	 */
 	fb_memory: framebuffer-memory {
-		reg = <0 0x7fa50000 0 0x530000>;
+		reg = <0 0x7fa75800 0 0x50a800>;
 	};
 
 	framebuffer {
 		compatible = "simple-framebuffer";
 		memory-region = <&fb_memory>;
 		width = <480>;
-		height = <800>;
+		height = <720>;
 		stride = <1920>;	/* 480 * 4 */
 		format = "x8r8g8b8";
 	};

@@ -35,7 +35,12 @@ step "1b. install lkfb (bootloader framebuffer) driver"
 cp "$PROJ/drivers/lkfb.c" drivers/video/fbdev/lkfb.c
 MKFB=drivers/video/fbdev/Makefile
 grep -q "lkfb.o" "$MKFB" || echo 'obj-$(CONFIG_FB_LKFB) += lkfb.o' >> "$MKFB"
+printf '#define BUILD_EPOCH %sULL
+' "$(date +%s)" > drivers/mt6755_buildstamp.h
 cp "$PROJ/drivers/mt6755_disp_dbg.c" drivers/mt6755_disp_dbg.c
+cp "$PROJ/drivers/mt6755_i2c_scan.c" drivers/mt6755_i2c_scan.c
+cp "$PROJ/drivers/mt6755_charger_probe.c" drivers/mt6755_charger_probe.c
+cp "$PROJ/drivers/mt6755_pmic.c" drivers/mt6755_pmic.c
 cp "$PROJ/drivers/input/axs15260.c" drivers/input/touchscreen/axs15260.c
 MKI2C=drivers/input/touchscreen/Makefile
 grep -q "axs15260.o" "$MKI2C" || echo 'obj-$(CONFIG_TOUCHSCREEN_AXS15260) += axs15260.o' >> "$MKI2C"
@@ -53,6 +58,9 @@ fi
 
 MKDBG=drivers/Makefile
 grep -q "mt6755_disp_dbg" "$MKDBG" || echo 'obj-y += mt6755_disp_dbg.o' >> "$MKDBG"
+grep -q "mt6755_i2c_scan" "$MKDBG" || echo 'obj-y += mt6755_i2c_scan.o' >> "$MKDBG"
+grep -q "mt6755_charger_probe" "$MKDBG" || echo 'obj-y += mt6755_charger_probe.o' >> "$MKDBG"
+grep -q "mt6755_pmic" "$MKDBG" || echo 'obj-y += mt6755_pmic.o' >> "$MKDBG"
 
 KFB=drivers/video/fbdev/Kconfig
 if ! grep -q "config FB_LKFB" "$KFB"; then
