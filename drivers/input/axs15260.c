@@ -22,6 +22,8 @@
 
 #define AXS_NAME	"axs15260"
 
+static const unsigned short alt_addrs[] = { 0x14, 0x38 };
+
 static int axs_probe(struct i2c_client *client)
 {
 	struct gpio_desc *reset, *intg;
@@ -66,6 +68,33 @@ static int axs_probe(struct i2c_client *client)
 	for (i = 0x80; i < 0x90; i++) {
 		ret = i2c_smbus_read_byte_data(client, i);
 		dev_info(&client->dev, "reg %#04x = %d\n", i, ret);
+	}
+
+	/*
+	 * The stock DT address may not match this panel: try the alternate
+	 * addresses seen on AXS-family boards (0x14 = GT9xx style, 0x38 =
+	 * the address that ACKed while the rail was off).
+	 */
+	for (i = 0; i < ARRAY_SIZE(alt_addrs); i++) {
+		struct i2c_client *alt;
+		int a, v, ok = 0;
+
+		if (alt_addrs[i] == client->addr)
+			continue;
+		alt = i2c_new_dummy_device(client->adapter, alt_addrs[i]);
+		if (IS_ERR(alt))
+			continue;
+
+		for (a = 0; a < 8; a++) {
+			v = i2c_smbus_read_byte_data(alt, a);
+			dev_info(&client->dev, "alt %#04x reg %d = %d\n",
+				 alt_addrs[i], a, v);
+			if (v >= 0)
+				ok++;
+		}
+		dev_info(&client->dev, "alt %#04x: %d/8 readable\n",
+			 alt_addrs[i], ok);
+		i2c_unregister_device(alt);
 	}
 
 	dev_info(&client->dev, "probe done (no input driver yet)\n");
