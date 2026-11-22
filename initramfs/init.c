@@ -34,6 +34,7 @@
 #include <linux/gpio.h>
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
+#include <linux/fb.h>
 
 static void cat(const char *path)
 {
@@ -1762,17 +1763,11 @@ static void print_banner(void)
 	}
 
 	/*
-	 * Go through /dev/kmsg instead of printf().  printk echoes the record
+	 * Go through /dev/kmsg instead of printf(): printk echoes the record
 	 * to the console as well, so this shows up in the serial transcript
-	 * *and* in dmesg -- with a timestamp, and without printing twice.
-	 * Plain printf() only ever reaches the console, which is why dmesg
-	 * used to show just the summary line.
-	 */
-	/*
-	 * Two lines for the version on purpose: with LOCALVERSION set the
-	 * release and the build stamp together reach 79 columns, and printk
-	 * adds a "[    8.650477] " prefix on top, which wraps an 80-column
-	 * terminal and tears the box apart.
+	 * *and* in dmesg, with a timestamp and without printing twice.
+	 * Two lines for the version on purpose -- release and build stamp
+	 * together reach 79 columns, and printk adds a prefix on top.
 	 */
 	n = snprintf(msg, sizeof(msg),
 		     "%s\n"
@@ -1788,7 +1783,6 @@ static void print_banner(void)
 
 	fd = open("/dev/kmsg", O_WRONLY);
 	if (fd < 0) {
-		/* no devtmpfs yet -- fall back to the console */
 		printf("%s", msg);
 		fflush(stdout);
 		return;
@@ -1837,9 +1831,8 @@ int main(void)
 	mkdir("/etc", 0755);
 	mkdir("/tmp", 0777);
 	install_tools();
-	/* telnetd is useful even before the USB link is up: it binds 0.0.0.0 */
-	system("/bin/busybox telnetd -l /bin/sh -p 23");
-	printf("telnetd: listening on port 23 (root shell, no password)\n");
+	/* telnet is served by /bin/consolehub below, so that serial, telnet and
+	 * the panel all share one shell instead of getting one each. */
 	mkdir("/sys/kernel/debug", 0755);
 	if (mount("debugfs", "/sys/kernel/debug", "debugfs", 0, "") != 0)
 		printf("debugfs mount failed: errno %d (%s)\n", errno, strerror(errno));
@@ -1941,6 +1934,7 @@ int main(void)
 	printf("*** census done, handing the console to /bin/sh ***\n");
 	print_banner();
 	fflush(stdout);
+	fflush(stdout);
 	/*
 	 * Do NOT run `busybox --install` here again: it recreates
 	 * /sbin/reboot, /sbin/poweroff and /sbin/halt as busybox symlinks and
@@ -1970,8 +1964,8 @@ int main(void)
 	setenv("HOME", "/", 1);
 	setenv("TERM", "vt100", 1);
 	setenv("ENV", "/etc/profile", 1);
-	mark("starting console shell");
-	execl("/bin/busybox", "busybox", "sh", "-i", NULL);
+	mark("starting console hub (shell shared by ttyS0/tty0/telnet)");
+	execl("/bin/consolehub", "consolehub", NULL);
 	printf("exec /bin/busybox failed: errno %d (%s)\n", errno, strerror(errno));
 	printf("*** idling ***\n");
 	fflush(stdout);

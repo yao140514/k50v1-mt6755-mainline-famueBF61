@@ -42,7 +42,7 @@
 		 * walk continues up to the root, where 2/2 is declared and
 		 * which is what the node below is written for.
 		 */
-		bootargs = "console=ttyS0,921600n8 earlycon loglevel=8 ignore_loglevel                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      ";
+		bootargs = "console=ttyS0,921600n8 console=tty0 earlycon loglevel=7 ignore_loglevel clk_ignore_unused pd_ignore_unused fbcon=map:0                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      ";
 
 	};
 
@@ -72,15 +72,15 @@
 	 * 1088x1920x4. If BOOT_LOGO or the panel ever changes, update both.
 	 */
 	fb_memory: framebuffer-memory {
-		reg = <0 0x7e3a0000 0 0x7f8000>;
+		reg = <0 0x7fa50000 0 0x530000>;
 	};
 
 	framebuffer {
 		compatible = "simple-framebuffer";
 		memory-region = <&fb_memory>;
-		width = <1080>;
-		height = <1920>;
-		stride = <4352>;	/* 1088 * 4, MTK_FB_ALIGNMENT = 32 */
+		width = <480>;
+		height = <800>;
+		stride = <1920>;	/* 480 * 4 */
 		format = "x8r8g8b8";
 	};
 
@@ -375,6 +375,15 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		status = "okay";
+
+		touchscreen@5d {
+			compatible = "axs,axs15260";
+			reg = <0x5d>;
+			interrupt-parent = <&pio>;
+			interrupts = <1 2>;		/* EINT0 = GPIO1, falling */
+			reset-gpios = <&pio 10 GPIO_ACTIVE_LOW>;
+			status = "okay";
+		};
 	};
 
 	/*

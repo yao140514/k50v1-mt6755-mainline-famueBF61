@@ -151,7 +151,9 @@ def main():
     p.add_argument("--kernel-addr", type=lambda x: int(x, 0), default=0x40080000)
     p.add_argument("--ramdisk-addr", type=lambda x: int(x, 0), default=0x45000000)
     p.add_argument("--second-addr", type=lambda x: int(x, 0), default=0x40F00000)
-    p.add_argument("--tags-addr", type=lambda x: int(x, 0), default=0x4E000000)
+    p.add_argument("--tags-addr", type=lambda x: int(x, 0), default=0x44000000,
+                   help="LK places the DTB at this address and asserts if the mblock "
+                        "reservation does not land exactly here (0x44000000 on MT6755)")
     p.add_argument("--os-version", type=lambda x: int(x, 0), default=0)
     p.add_argument("--header-version", type=int, default=0)
     p.add_argument("--dtb-size", type=lambda x: int(x, 0), default=0,

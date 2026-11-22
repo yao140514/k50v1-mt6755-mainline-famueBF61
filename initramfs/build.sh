@@ -21,6 +21,10 @@ printf '#define BUILD_EPOCH %sULL\n' "$(date +%s)" > "$SRC/build_time.h"
 aarch64-linux-gnu-gcc -static -O2 -I"$SRC" -o "$ROOT/init" "$SRC/init.c"
 chmod 755 "$ROOT/init"
 
+# One shell shared by serial, telnet and the panel.
+aarch64-linux-gnu-gcc -static -O2 -o "$ROOT/bin/consolehub" "$SRC/consolehub.c"
+chmod 755 "$ROOT/bin/consolehub"
+
 # Static busybox gives the console a real shell (ash) plus ~400 applets.
 if [ -x "$BUSYBOX" ]; then
 	cp "$BUSYBOX" "$ROOT/bin/busybox"
