@@ -31,6 +31,8 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
+#include <linux/cpu.h>
+#include <linux/kobject.h>
 #include <linux/workqueue.h>
 
 #define PWRAP_BASE		0x1000D000
@@ -57,6 +59,14 @@
 #define MT6353_EN_STATUS1	0x020E
 #define MT6353_EN_STATUS2	0x0210
 #define MT6353_TOP_RST_STATUS	0x02AE
+#define MT6353_TOPSTATUS	0x021C	/* bit1 = debounced power key */
+#define PWRKEY_DEB		BIT(1)
+#define DISPSYS_PWM0_BASE	0x1100E000
+#define PWM_SIZE		0x100
+#define PWM_EN_OFF		0x00
+#define PWM_COMMIT_OFF		0x08
+#define PWM_CON1_OFF		0x14
+#define PWM_LEVEL_DEFAULT	762	/* LK backlight 190 -> 1024 scale */
 #define MT6353_AUXADC_RQST0_SET	0x0E9A
 #define MT6353_AUXADC_ADC23	0x0E2E	/* CH0 BATSNS out + RDY bit15 */
 #define MT6353_AUXADC_ADC25	0x0E32	/* CH1 ISENSE out + RDY bit15 */
@@ -84,7 +94,92 @@ static int pwrap_update(u32 adr, u16 mask, u16 set);
 
 static void charger_wdt_kick(struct work_struct *w);
 
+static int pwrap_read(u32 adr, u32 *val);
+static int pwrap_write(u32 adr, u16 val);
+static void pwrkey_poll(struct work_struct *w);
+
 static DECLARE_DELAYED_WORK(wdt_kick, charger_wdt_kick);
+
+/* ---- charging mode: cpu0 only, backlight off, exit on power-key hold ---- */
+static void __iomem *pwm_base;
+static bool chgmode;
+static int pwrkey_baseline = -1;
+static int pwrkey_hold_polls;
+
+static DECLARE_DELAYED_WORK(pwrkey_work, pwrkey_poll);
+
+static void backlight_set(int level_1024)
+{
+	if (!pwm_base)
+		return;
+	writel(0, pwm_base + PWM_COMMIT_OFF);
+	writel((level_1024 << 16) | 0x3FF, pwm_base + PWM_CON1_OFF);
+	writel(level_1024 > 0 ? 1 : 0, pwm_base + PWM_EN_OFF);
+	writel(1, pwm_base + PWM_COMMIT_OFF);
+	writel(0, pwm_base + PWM_COMMIT_OFF);
+}
+
+static void chgmode_exit_locked(void)
+{
+	int i;
+
+	chgmode = false;
+	for (i = 1; i < 8; i++) {
+		if (!cpu_online(i) && cpu_possible(i))
+			add_cpu(i);
+	}
+	backlight_set(PWM_LEVEL_DEFAULT);
+	pr_info("mt6353: charging mode OFF (all cpus online, backlight on)\n");
+}
+
+static void pwrkey_poll(struct work_struct *w)
+{
+	u32 v = 0;
+	int bit;
+
+	if (pwrap_base && pwrap_read(MT6353_TOPSTATUS, &v) == 0)
+		bit = (v & PWRKEY_DEB) ? 1 : 0;
+	else
+		bit = 0;
+
+	if (chgmode) {
+		if (pwrkey_baseline < 0)
+			pwrkey_baseline = bit;
+		if (bit != pwrkey_baseline)
+			pwrkey_hold_polls++;
+		else
+			pwrkey_hold_polls = 0;
+
+		/* held for ~1.8 s at 300 ms polling -> leave charging mode */
+		if (pwrkey_hold_polls >= 6) {
+			pr_info("mt6353: power key held, leaving charging mode\n");
+			chgmode_exit_locked();
+			pwrkey_hold_polls = 0;
+			pwrkey_baseline = -1;
+		}
+	} else {
+		pwrkey_baseline = -1;
+		pwrkey_hold_polls = 0;
+	}
+	schedule_delayed_work(&pwrkey_work, msecs_to_jiffies(300));
+}
+
+static void chgmode_enter(void)
+{
+	int i;
+
+	if (chgmode)
+		return;
+	chgmode = true;
+	pwrkey_baseline = -1;
+	pwrkey_hold_polls = 0;
+	for (i = 1; i < 8; i++) {
+		if (cpu_online(i))
+			remove_cpu(i);
+	}
+	backlight_set(0);
+	pr_info("mt6353: charging mode ON (cpu0 only, backlight off)\n");
+}
 
 static int pwrap_wait_state(u32 want, int tries)
 {
@@ -272,6 +367,52 @@ static const struct power_supply_desc bat_desc = {
 
 static struct power_supply *bat_psy;
 
+static ssize_t chgmode_show(struct kobject *kobj, struct kobj_attribute *a,
+			    char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", chgmode ? 1 : 0);
+}
+
+static ssize_t chgmode_store(struct kobject *kobj, struct kobj_attribute *a,
+			     const char *buf, size_t count)
+{
+	if (count > 0 && buf[0] == '1') {
+		chgmode_enter();
+	} else if (count > 0 && buf[0] == '0') {
+		if (chgmode)
+			chgmode_exit_locked();
+	} else {
+		return -EINVAL;
+	}
+	return count;
+}
+
+static ssize_t pwrkey_show(struct kobject *kobj, struct kobj_attribute *a,
+			   char *buf)
+{
+	u32 v = 0;
+
+	if (pwrap_base && pwrap_read(MT6353_TOPSTATUS, &v) != 0)
+		return -EIO;
+	return scnprintf(buf, PAGE_SIZE, "%d\n", (v & PWRKEY_DEB) ? 1 : 0);
+}
+
+static struct kobj_attribute chgmode_attr = __ATTR(chgmode, 0644,
+						   chgmode_show, chgmode_store);
+static struct kobj_attribute pwrkey_attr = __ATTR(pwrkey, 0444,
+						  pwrkey_show, NULL);
+
+static struct attribute *mt6353_attrs[] = {
+	&chgmode_attr.attr,
+	&pwrkey_attr.attr,
+	NULL
+};
+
+static const struct attribute_group mt6353_attr_group = {
+	.name = "mt6353",
+	.attrs = mt6353_attrs,
+};
+
 static int __init mt6353_pmic_init(void)
 {
 	u32 v;
@@ -356,8 +497,17 @@ static int __init mt6353_pmic_init(void)
 		dump_reg("TOP_RST_STATUS", MT6353_TOP_RST_STATUS);
 	}
 
+	/* backlight control + power-key polling + charging-mode sysfs */
+	pwm_base = ioremap(DISPSYS_PWM0_BASE, PWM_SIZE);
+	if (!pwm_base)
+		pr_info("mt6353: PWM ioremap failed, backlight control disabled\n");
+
+	if (sysfs_create_group(kernel_kobj, &mt6353_attr_group) != 0)
+		pr_info("mt6353: sysfs group creation failed\n");
+
 	/* keep kicking the watchdog regardless of the state */
 	schedule_delayed_work(&wdt_kick, KICK_INTERVAL);
+	schedule_delayed_work(&pwrkey_work, msecs_to_jiffies(300));
 
 	dump_reg("EN_STATUS1", MT6353_EN_STATUS1);
 	dump_reg("EN_STATUS2", MT6353_EN_STATUS2);
