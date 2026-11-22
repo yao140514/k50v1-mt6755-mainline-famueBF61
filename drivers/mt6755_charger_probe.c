@@ -2,11 +2,15 @@
 /*
  * Charging IC bring-up probe.
  *
- * The stock overlay puts "swithing_charger" at 0x6b on i2c1, but the boot
- * census shows the only live device on that bus is at 0x62, and LK already
- * talked to it there (its REG00 is the input-current limit, like the BQ2589x
- * family).  Dump the whole register space so the chip can be identified and
- * a proper power-supply driver chosen.
+ * The stock overlay wires three charging-related devices on i2c1:
+ *
+ *	eta6937@6a		(ETA6937 switching charger)
+ *	switching_charger@2d	(generic MTK node, second charger?)
+ *	msa311@62		(G-sensor -- answers, so the bus is alive)
+ *
+ * Only 0x62 answered a QUICK write, which some ICs simply NACK, so this
+ * probe walks the candidate addresses with a plain byte READ (the most
+ * permissive form) and dumps whichever one answers.
  *
  * Temporary: delete once the real charger driver is bound.
  */
@@ -17,14 +21,14 @@
 #include <linux/module.h>
 
 #define CHG_BUS		1
-#define CHG_ADDR	0x62
-#define CHG_REG_LAST	0x14	/* BQ2589x: REG14 is the chip ID */
+#define CHG_REG_LAST	0x0f	/* ETA6937 register space is 0x00-0x0f */
+
+static const unsigned short chg_addrs[] = { 0x6a, 0x2d, 0x62 };
 
 static int __init mt6755_charger_probe(void)
 {
 	struct i2c_adapter *ad;
-	struct i2c_client *cl;
-	int i, v;
+	int a, i;
 
 	ad = i2c_get_adapter(CHG_BUS);
 	if (!ad) {
@@ -32,23 +36,30 @@ static int __init mt6755_charger_probe(void)
 		return 0;
 	}
 
-	cl = i2c_new_dummy_device(ad, CHG_ADDR);
-	if (IS_ERR(cl)) {
-		pr_info("chgprobe: no device at %#04x on bus %d\n",
-			CHG_ADDR, CHG_BUS);
-		i2c_put_adapter(ad);
-		return 0;
+	for (a = 0; a < ARRAY_SIZE(chg_addrs); a++) {
+		struct i2c_client *cl;
+		int i, v, ack = 0;
+
+		cl = i2c_new_dummy_device(ad, chg_addrs[a]);
+		if (IS_ERR(cl))
+			continue;
+
+		for (i = 0; i <= CHG_REG_LAST; i++) {
+			v = i2c_smbus_read_byte_data(cl, i);
+			if (v < 0)
+				pr_info("chgprobe: %#04x reg %#04x = %d\n",
+					chg_addrs[a], i, v);
+			else
+				pr_info("chgprobe: %#04x reg %#04x = %#04x\n",
+					chg_addrs[a], i, v);
+			ack++;
+		}
+
+		pr_info("chgprobe: %#04x probe done (%d reads)\n",
+			chg_addrs[a], ack);
+		i2c_unregister_device(cl);
 	}
 
-	for (i = 0; i <= CHG_REG_LAST; i++) {
-		v = i2c_smbus_read_byte_data(cl, i);
-		if (v < 0)
-			pr_info("chgprobe: reg %#04x = %d\n", i, v);
-		else
-			pr_info("chgprobe: reg %#04x = %#04x\n", i, v);
-	}
-
-	i2c_unregister_device(cl);
 	i2c_put_adapter(ad);
 	return 0;
 }

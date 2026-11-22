@@ -30,12 +30,18 @@ static int __init mt6755_i2c_scan(void)
 		found = 0;
 		for (addr = SCAN_FIRST; addr <= SCAN_LAST; addr++) {
 			union i2c_smbus_data data;
+			int w, r, val = -1;
 
-			if (i2c_smbus_xfer(adap, addr, 0, I2C_SMBUS_WRITE, 0,
-					   I2C_SMBUS_QUICK, &data) < 0)
+			w = i2c_smbus_xfer(adap, addr, 0, I2C_SMBUS_WRITE, 0,
+					   I2C_SMBUS_QUICK, &data);
+			r = i2c_smbus_xfer(adap, addr, 0, I2C_SMBUS_READ, 0,
+					   I2C_SMBUS_BYTE, &data);
+			if (w < 0 && r < 0)
 				continue;
-			pr_info("i2cscan: bus %d (%s) addr %#04x ACK\n",
-				bus, adap->name, addr);
+			if (r >= 0)
+				val = data.byte;
+			pr_info("i2cscan: bus %d (%s) addr %#04x ACK (w=%d r=%d byte=%#04x)\n",
+				bus, adap->name, addr, w, r, val);
 			found++;
 		}
 		pr_info("i2cscan: bus %d (%s): %d device(s)\n",
