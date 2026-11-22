@@ -29,6 +29,8 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/platform_device.h>
+#include <linux/power_supply.h>
 #include <linux/workqueue.h>
 
 #define PWRAP_BASE		0x1000D000
@@ -55,6 +57,9 @@
 #define MT6353_EN_STATUS1	0x020E
 #define MT6353_EN_STATUS2	0x0210
 #define MT6353_TOP_RST_STATUS	0x02AE
+#define MT6353_AUXADC_RQST0_SET	0x0E9A
+#define MT6353_AUXADC_ADC23	0x0E2E	/* CH0 BATSNS out + RDY bit15 */
+#define MT6353_AUXADC_ADC25	0x0E32	/* CH1 ISENSE out + RDY bit15 */
 
 /* CHR_CON0 bits */
 #define RG_VCDT_HV_EN		BIT(0)
@@ -155,6 +160,118 @@ static void charger_wdt_kick(struct work_struct *w)
 	schedule_delayed_work(&wdt_kick, KICK_INTERVAL);
 }
 
+
+/*
+ * AUXADC: request a conversion, wait for RDY, convert.  Channels 0/1 use
+ * raw * 3 * 1800 / 32768 (matches the preloader: raw 20432 -> 3367 mV).
+ */
+static int auxadc_read_mv(int ch, u32 out_reg)
+{
+	u32 v;
+	int tries = 20;
+
+	pwrap_write(MT6353_AUXADC_RQST0_SET, 1u << ch);
+	while (tries-- > 0) {
+		if (pwrap_read(out_reg, &v) != 0)
+			return -EIO;
+		if (v & BIT(15))
+			break;
+		msleep(1);
+	}
+	if (tries < 0)
+		return -ETIMEDOUT;
+
+	v &= 0x7FFF;
+	return (int)(v * 3 * 1800 / 32768);
+}
+
+static int auxadc_read_checked(int ch, u32 out_reg)
+{
+	int mv = auxadc_read_mv(ch, out_reg);
+
+	if (mv < 0 || mv > 6000)
+		return -1;
+	return mv;
+}
+
+static bool charger_active(void)
+{
+	u32 v = 0;
+
+	if (pwrap_read(MT6353_CHR_CON0, &v) != 0)
+		return false;
+	return (v & (RGS_CHRDET | RG_CHR_EN)) == (RGS_CHRDET | RG_CHR_EN);
+}
+
+static int bat_get_prop(struct power_supply *psy,
+			enum power_supply_property psp,
+			union power_supply_propval *val)
+{
+	int mv_bat, mv_i;
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_STATUS:
+		val->intval = charger_active() ?
+			      POWER_SUPPLY_STATUS_CHARGING :
+			      POWER_SUPPLY_STATUS_DISCHARGING;
+		break;
+	case POWER_SUPPLY_PROP_PRESENT:
+	case POWER_SUPPLY_PROP_ONLINE:
+		val->intval = 1;
+		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		mv_bat = auxadc_read_checked(0, MT6353_AUXADC_ADC23);
+		val->intval = (mv_bat > 0) ? mv_bat * 1000 : 0;
+		break;
+	case POWER_SUPPLY_PROP_CURRENT_NOW:
+		mv_bat = auxadc_read_checked(0, MT6353_AUXADC_ADC23);
+		mv_i = auxadc_read_checked(1, MT6353_AUXADC_ADC25);
+		if (mv_bat < 0 || mv_i < 0) {
+			val->intval = 0;
+		} else {
+			/* 68 mOhm sense resistor, LK CUST_R_SENSE */
+			val->intval = (mv_i - mv_bat) * 1000 / 68 * 1000;
+		}
+		break;
+	case POWER_SUPPLY_PROP_CAPACITY:
+		mv_bat = auxadc_read_checked(0, MT6353_AUXADC_ADC23);
+		if (mv_bat < 0) {
+			val->intval = 0;
+		} else {
+			int cap = (mv_bat - 3400) * 100 / (4200 - 3400);
+
+			val->intval = clamp(cap, 0, 100);
+		}
+		break;
+	case POWER_SUPPLY_PROP_TECHNOLOGY:
+		val->intval = POWER_SUPPLY_TECHNOLOGY_LIPO;
+		break;
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static enum power_supply_property bat_props[] = {
+	POWER_SUPPLY_PROP_STATUS,
+	POWER_SUPPLY_PROP_PRESENT,
+	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+	POWER_SUPPLY_PROP_CURRENT_NOW,
+	POWER_SUPPLY_PROP_CAPACITY,
+	POWER_SUPPLY_PROP_TECHNOLOGY,
+};
+
+static const struct power_supply_desc bat_desc = {
+	.name = "battery",
+	.type = POWER_SUPPLY_TYPE_BATTERY,
+	.properties = bat_props,
+	.num_properties = ARRAY_SIZE(bat_props),
+	.get_property = bat_get_prop,
+};
+
+static struct power_supply *bat_psy;
+
 static int __init mt6353_pmic_init(void)
 {
 	u32 v;
@@ -244,6 +361,22 @@ static int __init mt6353_pmic_init(void)
 
 	dump_reg("EN_STATUS1", MT6353_EN_STATUS1);
 	dump_reg("EN_STATUS2", MT6353_EN_STATUS2);
+
+	/* /sys/class/power_supply/battery -- standard battery query point */
+	{
+		struct platform_device *pdev;
+
+		pdev = platform_device_register_simple("mt6353-battery", -1,
+						       NULL, 0);
+		if (!IS_ERR(pdev)) {
+			bat_psy = devm_power_supply_register(&pdev->dev,
+							     &bat_desc, NULL);
+			if (IS_ERR(bat_psy))
+				bat_psy = NULL;
+		}
+		if (bat_psy)
+			pr_info("mt6353: battery registered: cat /sys/class/power_supply/battery/uevent\n");
+	}
 
 	pr_info("mt6353: probe done\n");
 	return 0;
