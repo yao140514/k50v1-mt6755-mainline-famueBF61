@@ -11,7 +11,7 @@
 | 功能 | 状态 | 说明 |
 |---|---|---|
 | 引导 | ✅ | 自编译 LK（`svoboda18/lk`）+ 自制 MTK 头 boot.img |
-| 内核 | ✅ | 6.12.115，单核 A53，3.66 GiB 可用 |
+| 内核 | ✅ | 6.12.115，8 核 A53（PSCI v0.2），3.7 GiB 可用 |
 | 串口控制台 | ✅ | CH340，921600 8N1，`ttyS0` |
 | USB gadget | ✅ | `mtu3`（MTK SSUSB），CDC-ACM + CDC-NCM |
 | USB 网络 | ✅ | NCM，PC 侧需静态 `192.168.137.x` 或 ICS |
@@ -19,9 +19,13 @@
 | 文件系统 | ✅ | `vendor`/`system` 只读挂载，`userdata` 可写 |
 | pinctrl | ✅ | `pinctrl-mt6755.c`（190 引脚，paris 框架） |
 | I2C | ⚠️ | `i2c1` 正常；`i2c0` 控制器不产生中断（已定位到硬件侧） |
-| 显示 | ❌ | 缺 mmsys + DSI + panel 三层驱动；面板为 480×800 |
-| 触摸 | ❌ | AXS 控制器，地址 `0x5d`，挂在 `i2c0` 上，受显示依赖 |
-| SMP | ❌ | PSCI v0.2 可用但 CPU1 的 MTCMOS 电源域未上电（见 `docs/smp.md`） |
+| 显示 | ✅ | LK framebuffer + simplefb + fbcon（480×800，内核直用 LK 留下的帧） |
+| 电池/充电 | ✅ | MT6353 内置充电器（PWRAP 直通 WACS2），`/sys/class/power_supply/battery` |
+| 充电模式 | ✅ | `chgmode`：仅 CPU0 + 关背光，长按电源键 ~2s 或 `chgmode 0` 退出 |
+| fastfetch | ✅ | `fastfetch`：系统信息 + 电池状态一屏 |
+| 触摸 | ⚠️ | 探针已定位：不在 0x5d/0x14/0x38（i2c0），嫌疑 i2c1@0x62，待交互验证 |
+| SMP | ✅ | 8 核全上（r87 起）；`chgmode` 下线 CPU1-7 |
+| SMP(旧) | -- | PSCI v0.2 可用，CPU MTCMOS 电源域已解决（见 `docs/smp.md`） |
 
 ## 目录
 
