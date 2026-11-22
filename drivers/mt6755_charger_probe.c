@@ -21,7 +21,7 @@
 #include <linux/module.h>
 
 #define CHG_BUS		1
-#define CHG_REG_LAST	0x0f	/* ETA6937 register space is 0x00-0x0f */
+#define CHG_REG_LAST	0x2f	/* widen: chip ID often sits above 0x0f */
 
 static const unsigned short chg_addrs[] = { 0x6a, 0x2d, 0x62 };
 

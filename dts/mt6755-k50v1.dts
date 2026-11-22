@@ -382,6 +382,7 @@
 			interrupt-parent = <&pio>;
 			interrupts = <1 2>;		/* EINT0 = GPIO1, falling */
 			reset-gpios = <&pio 10 GPIO_ACTIVE_LOW>;
+			int-gpios = <&pio 1 GPIO_ACTIVE_HIGH>;
 			status = "okay";
 		};
 	};

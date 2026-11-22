@@ -24,13 +24,21 @@
 
 static int axs_probe(struct i2c_client *client)
 {
-	struct gpio_desc *reset;
+	struct gpio_desc *reset, *intg;
 	int i, ret;
 
 	reset = devm_gpiod_get_optional(&client->dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(reset))
 		return dev_err_probe(&client->dev, PTR_ERR(reset),
 				     "cannot get reset gpio\n");
+
+	/* INT level tells us whether the chip is alive even before i2c works */
+	intg = devm_gpiod_get_optional(&client->dev, "int", GPIOD_IN);
+	if (IS_ERR(intg))
+		intg = NULL;
+	if (intg)
+		dev_info(&client->dev, "int gpio level = %d\n",
+			 gpiod_get_value_cansleep(intg));
 
 	if (reset) {
 		dev_info(&client->dev,
