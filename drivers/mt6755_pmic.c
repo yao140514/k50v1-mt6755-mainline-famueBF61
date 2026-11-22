@@ -68,6 +68,7 @@
 #define MT6353_CHR_CON16	0x0FAC	/* USBDL_RST */
 #define MT6353_CHR_CON20	0x0FB4	/* BC11_RST */
 #define MT6353_CHR_CON25	0x0FBE	/* CSDAC_MODE */
+#define MT6353_TOP_RST_STATUS	0x02AE	/* reset cause register */
 
 static void __iomem *pwrap;
 
@@ -217,12 +218,33 @@ static int __init mt6353_pmic_init(void)
 				     RG_VCDT_HV_EN | RG_PCHR_AUTOMODE | RG_CHR_EN,
 				     RG_VCDT_HV_EN | RG_PCHR_AUTOMODE | RG_CHR_EN);
 
-			pwrap_read(MT6353_CHR_CON0, &v);
-			pr_info("mt6353: charging requested, CHR_CON0 now %#05x\n", v);
-
-			schedule_delayed_work(&wdt_kick, KICK_INTERVAL);
-		}
+		pwrap_read(MT6353_CHR_CON0, &v);
+		pr_info("mt6353: charging requested, CHR_CON0 now %#05x\n", v);
 	}
+
+	/*
+	 * Diagnostics: did any of the writes stick at all?  TD is a benign
+	 * field -- write 0x3 and read it back to separate "WACS2 write is
+	 * broken" from "the charger hardware clears the enable bits".
+	 */
+	{
+		u32 td = 0;
+
+		pwrap_update(MT6353_CHR_CON13, 0xF, 0x3);
+		pwrap_read(MT6353_CHR_CON13, &td);
+		pr_info("mt6353: write test: TD bits = %#04x (%s)\n",
+			td & 0xF, ((td & 0xF) == 0x3) ? "writes stick" : "writes lost");
+
+		dump_reg("CHR_CON13 (wdt)", MT6353_CHR_CON13);
+		dump_reg("CHR_CON15 (wdt int)", MT6353_CHR_CON15);
+		dump_reg("CHR_CON16 (usbdl)", MT6353_CHR_CON16);
+		dump_reg("CHR_CON20 (bc11)", MT6353_CHR_CON20);
+		dump_reg("CHR_CON25 (csdac mode)", MT6353_CHR_CON25);
+		dump_reg("TOP_RST_STATUS", MT6353_TOP_RST_STATUS);
+	}
+
+	/* keep kicking the watchdog regardless of the state */
+	schedule_delayed_work(&wdt_kick, KICK_INTERVAL);
 
 	dump_reg("EN_STATUS1", MT6353_EN_STATUS1);
 	dump_reg("EN_STATUS2", MT6353_EN_STATUS2);
