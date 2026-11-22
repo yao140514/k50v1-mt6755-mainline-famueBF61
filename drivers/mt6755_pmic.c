@@ -26,6 +26,7 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/workqueue.h>
 
 #define PWRAP_BASE		0x1000D000
 #define PWRAP_SIZE		0x100
@@ -54,6 +55,35 @@
 /* CHR_CON2 bits */
 #define RG_VBAT_CV_EN		BIT(1)
 #define RG_CS_EN		BIT(3)
+
+/* charger watchdog bits */
+#define CHRWDT_WR		BIT(8)
+#define CHRWDT_EN		BIT(4)
+
+/* extra charger registers (LK pchr_turn_on_charging sequence) */
+#define MT6353_CHR_CON4		0x0F94	/* CS_VTH [3:0] */
+#define MT6353_CHR_CON13	0x0FA6	/* CHRWDT TD/WR/EN */
+#define MT6353_CHR_CON15	0x0FAA	/* CHRWDT_INT_EN */
+#define MT6353_CHR_CON16	0x0FAC	/* USBDL_RST */
+#define MT6353_CHR_CON20	0x0FB4	/* BC11_RST */
+#define MT6353_CHR_CON25	0x0FBE	/* CSDAC_MODE */
+
+static void __iomem *pwrap;
+
+static int pwrap_update(u32 adr, u16 mask, u16 set);
+
+static void charger_wdt_kick(struct work_struct *w);
+
+static DECLARE_DELAYED_WORK(wdt_kick, charger_wdt_kick);
+#define KICK_INTERVAL	msecs_to_jiffies(20000)
+
+static void charger_wdt_kick(struct work_struct *w)
+{
+	/* the charger watchdog re-arms the timeout and clears on expiry */
+	if (pwrap)
+		pwrap_update(MT6353_CHR_CON13, CHRWDT_WR, CHRWDT_WR);
+	schedule_delayed_work(&wdt_kick, KICK_INTERVAL);
+}
 
 static void __iomem *pwrap;
 
@@ -153,14 +183,43 @@ static int __init mt6353_pmic_init(void)
 			(v & RG_PCHR_AUTOMODE) ? "on" : "off");
 
 		if (!(v & RG_CHR_EN)) {
-			/* vendor default profile: PMIC auto charge mode */
+			/*
+			 * Mirror LK's pchr_turn_on_charging() step by step:
+			 * USBDL must be left first (we are always plugged
+			 * into USB, and USBDL mode locks the charger), then
+			 * the charger watchdog is armed -- with the watchdog
+			 * running the enable bits get cleared again after the
+			 * timeout, which is exactly what happened before.
+			 */
+			pwrap_update(MT6353_CHR_CON16, BIT(2), BIT(2));  /* leave USBDL */
+			pwrap_update(MT6353_CHR_CON20, BIT(1), BIT(1));  /* BC11_RST */
+
+			/* watchdog: 32 s timeout, arm it and enable */
+			pwrap_update(MT6353_CHR_CON13, 0xF, 0x3);        /* TD = 32 s */
+			pwrap_update(MT6353_CHR_CON13,
+				     CHRWDT_WR | CHRWDT_EN, CHRWDT_WR | CHRWDT_EN);
+			pwrap_update(MT6353_CHR_CON15, BIT(0), BIT(0));  /* INT_EN */
+
+			/* input current limit: CS_VTH 0xC = 450 mA */
+			pwrap_update(MT6353_CHR_CON4, 0xF, 0xC);
+
+			/* the actual switch */
+			pwrap_update(MT6353_CHR_CON0,
+				     RG_CSDAC_EN | RG_CHR_EN,
+				     RG_CSDAC_EN | RG_CHR_EN);
+			pwrap_update(MT6353_CHR_CON25, BIT(2), BIT(2));  /* CSDAC_MODE */
+
+			/* battery CV + current sense on */
 			pwrap_update(MT6353_CHR_CON2, RG_VBAT_CV_EN | RG_CS_EN,
 				     RG_VBAT_CV_EN | RG_CS_EN);
 			pwrap_update(MT6353_CHR_CON0,
 				     RG_VCDT_HV_EN | RG_PCHR_AUTOMODE | RG_CHR_EN,
 				     RG_VCDT_HV_EN | RG_PCHR_AUTOMODE | RG_CHR_EN);
+
 			pwrap_read(MT6353_CHR_CON0, &v);
 			pr_info("mt6353: charging requested, CHR_CON0 now %#05x\n", v);
+
+			schedule_delayed_work(&wdt_kick, KICK_INTERVAL);
 		}
 	}
 
