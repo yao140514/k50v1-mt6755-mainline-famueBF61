@@ -27,6 +27,11 @@
 | SMP | ✅ | 8 核全上（r87 起）；`chgmode` 下线 CPU1-7 |
 | SMP(旧) | -- | PSCI v0.2 可用，CPU MTCMOS 电源域已解决（见 `docs/smp.md`） |
 
+## 常用命令
+
+详见 [docs/usage.md](docs/usage.md)：电量查询、CPU 查询、充电模式、关机/重启，
+以及 fastfetch 与充电模式的实拍截图。
+
 ## 目录
 
 ```
