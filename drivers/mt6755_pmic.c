@@ -49,6 +49,7 @@
 /* CHR_CON0 bits */
 #define RG_VCDT_HV_EN		BIT(0)
 #define RG_PCHR_AUTOMODE	BIT(2)
+#define RG_CSDAC_EN		BIT(3)
 #define RG_CHR_EN		BIT(4)
 #define RGS_CHRDET		BIT(5)
 
